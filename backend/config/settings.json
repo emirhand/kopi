@@ -1,0 +1,11 @@
+{
+  "smtp": {
+    "host": "smtp.example.com",
+    "port": 587,
+    "user": "",
+    "password": "",
+    "from_email": "copier@example.com",
+    "tls": true
+  },
+  "admin_password": "1234"
+}
