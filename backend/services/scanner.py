@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import subprocess
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Final
 
 _NO_PAPER_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
@@ -30,6 +33,14 @@ log = logging.getLogger("kopi.scanner")
 class ScanResult:
     ok: bool
     stdout: bytes
+    stderr: str
+    user_message: str | None
+
+
+@dataclass(frozen=True)
+class ScanFileResult:
+    ok: bool
+    path: str
     stderr: str
     user_message: str | None
 
@@ -132,3 +143,76 @@ async def scan_pdf(
         result.user_message,
     )
     return result
+
+
+async def scan_copy_image_file(
+    *,
+    duplex: bool = False,
+    device: str | None = None,
+    timeout_sec: int = 300,
+) -> ScanFileResult:
+    """Run ``scanimage`` to a temporary PNG file for robust copy-print path."""
+    env = os.environ.copy()
+    fd, file_path = tempfile.mkstemp(prefix="kopi-copy-", suffix=".png")
+    os.close(fd)
+    output = Path(file_path)
+
+    base_cmd = ["scanimage", "--format=png"]
+    dev = device or env.get("SCAN_DEVICE")
+    if dev:
+        base_cmd.extend(["-d", dev])
+    if duplex:
+        base_cmd.extend(["--source", "ADF", "--duplex"])
+    cmd = base_cmd + ["-o", file_path]
+
+    async def run(run_cmd: list[str]) -> tuple[int, str]:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *run_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            return 127, str(e)
+        try:
+            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            return 124, "timeout"
+        return proc.returncode, (stderr or b"").decode(errors="replace")
+
+    rc, err_text = await run(cmd)
+    if rc != 0 and "--resolution" in err_text and "unrecognized option" in err_text:
+        cmd = base_cmd + ["-o", file_path]
+        rc, err_text = await run(cmd)
+    if rc != 0 and "initialize parameter is error" in err_text.lower():
+        safe_cmd = ["scanimage", "--format=png"]
+        if dev:
+            safe_cmd.extend(["-d", dev])
+        safe_cmd.extend(["--source", "Flatbed", "-o", file_path])
+        cmd = safe_cmd
+        rc, err_text = await run(cmd)
+
+    if rc == 127:
+        output.unlink(missing_ok=True)
+        return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Scanner Not Found")
+    if rc == 124:
+        output.unlink(missing_ok=True)
+        return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Scanner Busy")
+    if rc != 0:
+        output.unlink(missing_ok=True)
+        return ScanFileResult(
+            ok=False,
+            path="",
+            stderr=err_text,
+            user_message=classify_scan_error(err_text) or f"Scanner error: {err_text.strip() or rc}",
+        )
+    try:
+        if output.stat().st_size <= 0:
+            output.unlink(missing_ok=True)
+            return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Scanner returned no data")
+    except OSError as e:
+        output.unlink(missing_ok=True)
+        return ScanFileResult(ok=False, path="", stderr=str(e), user_message=f"Scan output file error: {e}")
+
+    log.info("scan_copy_file_ok duplex=%s device=%r path=%s", duplex, dev, file_path)
+    return ScanFileResult(ok=True, path=file_path, stderr=err_text, user_message=None)

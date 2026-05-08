@@ -71,6 +71,17 @@ class PrinterBridge(ABC):
         timeout_sec: int = 120,
     ) -> PrintResult: ...
 
+    @abstractmethod
+    async def print_file(
+        self,
+        file_path: str,
+        *,
+        duplex: bool = False,
+        job_name: str = "kopi-job",
+        device: str | None = None,
+        timeout_sec: int = 120,
+    ) -> PrintResult: ...
+
 
 def _kill_quiet(proc: asyncio.subprocess.Process) -> None:
     try:
@@ -287,24 +298,50 @@ class RealPrinterBridge(PrinterBridge):
         device: str | None = None,
         timeout_sec: int = 120,
     ) -> PrintResult:
+        import tempfile
+        from pathlib import Path
+
+        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = Path(tmp.name)
+        try:
+            return await self.print_file(
+                str(tmp_path),
+                duplex=duplex,
+                job_name=job_name,
+                device=device,
+                timeout_sec=timeout_sec,
+            )
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+    async def print_file(
+        self,
+        file_path: str,
+        *,
+        duplex: bool = False,
+        job_name: str = "kopi-job",
+        device: str | None = None,
+        timeout_sec: int = 120,
+    ) -> PrintResult:
         cmd: list[str] = ["lp", "-t", job_name]
         if duplex:
             cmd.extend(["-o", "sides=two-sided-long-edge"])
         dest = device or os.environ.get("CUPS_DEST")
         if dest:
             cmd.extend(["-d", dest])
+        cmd.append(file_path)
 
         log.info(
-            "print_start mode=real duplex=%s device=%r bytes=%d cmd=%s",
+            "print_start mode=real duplex=%s device=%r path=%s cmd=%s",
             duplex,
             device,
-            len(pdf_bytes),
+            file_path,
             " ".join(cmd),
         )
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdin=asyncio.subprocess.PIPE,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
@@ -316,7 +353,7 @@ class RealPrinterBridge(PrinterBridge):
 
         try:
             stdout, stderr = await asyncio.wait_for(
-                proc.communicate(input=pdf_bytes), timeout=timeout_sec
+                proc.communicate(), timeout=timeout_sec
             )
         except asyncio.TimeoutError:
             log.error("print_timeout mode=real timeout=%ss", timeout_sec)
@@ -441,6 +478,35 @@ class MockPrinterBridge(PrinterBridge):
         )
         await asyncio.sleep(delay)
         log.info("print_ok mode=mock")
+        return PrintResult(ok=True, stderr="", user_message=None)
+
+    async def print_file(
+        self,
+        file_path: str,
+        *,
+        duplex: bool = False,
+        job_name: str = "kopi-job",
+        device: str | None = None,
+        timeout_sec: int = 120,
+    ) -> PrintResult:
+        _ = timeout_sec
+        delay = random.uniform(1.0, 2.0)
+        cmd_preview = ["lp", "-t", job_name]
+        if duplex:
+            cmd_preview.extend(["-o", "sides=two-sided-long-edge"])
+        if device:
+            cmd_preview.extend(["-d", device])
+        cmd_preview.append(file_path)
+        log.info(
+            "print_file_start mode=mock duplex=%s device=%r path=%s cmd=%s delay=%.2fs",
+            duplex,
+            device,
+            file_path,
+            " ".join(cmd_preview),
+            delay,
+        )
+        await asyncio.sleep(delay)
+        log.info("print_file_ok mode=mock")
         return PrintResult(ok=True, stderr="", user_message=None)
 
 

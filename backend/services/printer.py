@@ -70,6 +70,33 @@ async def print_pdf(
     return result
 
 
+async def print_file(
+    file_path: str,
+    *,
+    duplex: bool = False,
+    job_name: str = "kopi-copy",
+    device: str | None = None,
+    timeout_sec: int = 120,
+) -> PrintResult:
+    """Send file at ``file_path`` to CUPS via ``lp``."""
+    from .hardware import get_printer
+
+    result = await get_printer().print_file(
+        file_path,
+        duplex=duplex,
+        job_name=job_name,
+        device=device,
+        timeout_sec=timeout_sec,
+    )
+    log.info(
+        "print_file_facade duplex=%s ok=%s user_message=%r",
+        duplex,
+        result.ok,
+        result.user_message,
+    )
+    return result
+
+
 def list_printer_queues(timeout_sec: int = 8) -> list[str]:
     """Return available CUPS destination names using several command fallbacks."""
 

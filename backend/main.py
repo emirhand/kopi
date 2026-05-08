@@ -31,38 +31,42 @@ SCAN_TTL_SEC = int(os.environ.get("KOPI_SCAN_TTL_SEC", "300"))
 
 
 class _ScanStore:
-    """In-memory scan PDF cache with lazy TTL expiry."""
+    """In-memory copy artifact cache with lazy TTL expiry."""
 
     def __init__(self, ttl_sec: int) -> None:
         self._ttl_sec = ttl_sec
         self._lock = asyncio.Lock()
-        self._data: dict[str, tuple[float, bytes]] = {}
+        self._data: dict[str, tuple[float, str]] = {}
 
     def _purge_unlocked(self) -> None:
         now = time.monotonic()
         dead = [k for k, (exp, _) in self._data.items() if exp <= now]
         for k in dead:
-            del self._data[k]
+            _exp, path = self._data.pop(k)
+            try:
+                Path(path).unlink(missing_ok=True)
+            except OSError:
+                pass
 
-    async def put(self, pdf: bytes) -> str:
+    async def put_path(self, path: str) -> str:
         scan_id = uuid.uuid4().hex
         exp = time.monotonic() + self._ttl_sec
         async with self._lock:
             self._purge_unlocked()
-            self._data[scan_id] = (exp, pdf)
-        log.info("scan_cached scan_id=%s bytes=%d ttl_sec=%d", scan_id, len(pdf), self._ttl_sec)
+            self._data[scan_id] = (exp, path)
+        log.info("scan_cached scan_id=%s path=%s ttl_sec=%d", scan_id, path, self._ttl_sec)
         return scan_id
 
-    async def pop(self, scan_id: str) -> bytes:
+    async def pop_path(self, scan_id: str) -> str:
         async with self._lock:
             self._purge_unlocked()
             item = self._data.pop(scan_id, None)
             if item is None:
                 raise KeyError(scan_id)
-            exp, pdf = item
+            exp, path = item
             if exp <= time.monotonic():
                 raise KeyError(scan_id)
-            return pdf
+            return path
 
 
 SCAN_STORE = _ScanStore(SCAN_TTL_SEC)
@@ -150,36 +154,44 @@ def api_hardware():
 @app.post("/api/scan")
 async def api_scan(body: ScanBody):
     settings = load_settings()
-    scan = await scanner.scan_pdf(
+    scan = await scanner.scan_copy_image_file(
         duplex=body.duplex,
         device=str(settings.get("scanner_device", "")).strip() or None,
     )
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
-    scan_id = await SCAN_STORE.put(scan.stdout)
-    return {"scan_id": scan_id, "bytes": len(scan.stdout)}
+    scan_id = await SCAN_STORE.put_path(scan.path)
+    try:
+        bytes_size = Path(scan.path).stat().st_size
+    except OSError:
+        bytes_size = 0
+    return {"scan_id": scan_id, "bytes": bytes_size}
 
 
 @app.post("/api/print")
 async def api_print(body: PrintBody):
     settings = load_settings()
     try:
-        pdf = await SCAN_STORE.pop(body.scan_id)
+        image_path = await SCAN_STORE.pop_path(body.scan_id)
     except KeyError:
         raise HTTPException(
             status_code=400,
             detail="Scan expired or not found. Please scan again.",
         ) from None
 
-    result = await printer.print_pdf(
-        pdf,
+    result = await printer.print_file(
+        image_path,
         duplex=body.duplex,
         job_name="kopi-copy",
         device=str(settings.get("printer_device", "")).strip() or None,
     )
     if not result.ok:
-        await SCAN_STORE.put(pdf)
+        await SCAN_STORE.put_path(image_path)
         raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
+    try:
+        Path(image_path).unlink(missing_ok=True)
+    except OSError:
+        pass
     message = "Print job submitted"
     if result.job_id:
         message += f" ({result.job_id})"
