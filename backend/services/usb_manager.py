@@ -6,26 +6,30 @@ import os
 from pathlib import Path
 
 
-def first_usb_mount(media_root: str = "/media") -> Path | None:
+def _default_roots() -> list[str]:
+    raw = os.environ.get("KOPI_USB_ROOTS", "/media,/run/media,/Volumes")
+    return [x.strip() for x in raw.split(",") if x.strip()]
+
+
+def first_usb_mount(roots: list[str] | None = None) -> Path | None:
     """
-    Return the first plausible user mount under /media or /media/$USER.
+    Return the first plausible writable mount under configured roots.
     Order is filesystem-dependent; first match is used.
     """
-    root = Path(media_root)
-    if not root.is_dir():
-        return None
-
     candidates: list[Path] = []
-    for child in sorted(root.iterdir()):
-        if child.is_dir():
-            candidates.append(child)
-            # e.g. /media/username/DEVICE
-            try:
-                for sub in sorted(child.iterdir()):
-                    if sub.is_dir():
-                        candidates.append(sub)
-            except OSError:
-                continue
+    for root_str in (roots or _default_roots()):
+        root = Path(root_str)
+        if not root.is_dir():
+            continue
+        for child in sorted(root.iterdir()):
+            if child.is_dir():
+                candidates.append(child)
+                try:
+                    for sub in sorted(child.iterdir()):
+                        if sub.is_dir():
+                            candidates.append(sub)
+                except OSError:
+                    continue
 
     for path in candidates:
         try:
@@ -36,8 +40,8 @@ def first_usb_mount(media_root: str = "/media") -> Path | None:
     return None
 
 
-def require_usb_path(media_root: str = "/media") -> Path:
-    p = first_usb_mount(media_root)
+def require_usb_path(roots: list[str] | None = None) -> Path:
+    p = first_usb_mount(roots)
     if p is None:
         raise FileNotFoundError("USB Not Found")
     return p

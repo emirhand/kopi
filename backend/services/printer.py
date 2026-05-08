@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import subprocess
 from dataclasses import dataclass
 from typing import Final
 
@@ -44,6 +45,7 @@ async def print_pdf(
     *,
     duplex: bool = False,
     job_name: str = "kopi-copy",
+    device: str | None = None,
     timeout_sec: int = 120,
 ) -> PrintResult:
     """Send ``pdf_bytes`` to the default (or ``CUPS_DEST``) queue via ``lp``."""
@@ -53,6 +55,7 @@ async def print_pdf(
         pdf_bytes,
         duplex=duplex,
         job_name=job_name,
+        device=device,
         timeout_sec=timeout_sec,
     )
     log.info(
@@ -62,3 +65,26 @@ async def print_pdf(
         result.user_message,
     )
     return result
+
+
+def list_printer_queues(timeout_sec: int = 8) -> list[str]:
+    """Return available CUPS destination names from `lpstat -a` output."""
+    try:
+        proc = subprocess.run(
+            ["lpstat", "-a"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    destinations: list[str] = []
+    for line in (proc.stdout or "").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        dest = line.split()[0]
+        if dest:
+            destinations.append(dest)
+    return destinations

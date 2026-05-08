@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import subprocess
 from dataclasses import dataclass
 from typing import Final
 
@@ -44,10 +45,17 @@ def classify_scan_error(stderr: str) -> str | None:
     return None
 
 
-def build_scanimage_pdf_cmd(*, duplex_scan: bool = False, device: str | None = None) -> list[str]:
+def build_scanimage_pdf_cmd(
+    *,
+    duplex_scan: bool = False,
+    device: str | None = None,
+    include_resolution: bool = True,
+) -> list[str]:
     """Arguments for `scanimage` emitting PDF on stdout (ends with `-o -`)."""
     env = os.environ.copy()
-    cmd: list[str] = ["scanimage", "--format=pdf", "--mode=Color", "--resolution", "300"]
+    cmd: list[str] = ["scanimage", "--format=pdf", "--mode=Color"]
+    if include_resolution:
+        cmd.extend(["--resolution", env.get("SCAN_RESOLUTION", "300")])
 
     dev = device or env.get("SCAN_DEVICE")
     if dev:
@@ -62,6 +70,29 @@ def build_scanimage_pdf_cmd(*, duplex_scan: bool = False, device: str | None = N
 
     cmd.extend(["-o", "-"])
     return cmd
+
+
+def list_scan_devices(timeout_sec: int = 8) -> list[str]:
+    """Return scanner device names from `scanimage -L` output."""
+    try:
+        proc = subprocess.run(
+            ["scanimage", "-L"],
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+
+    text = (proc.stdout or "") + "\n" + (proc.stderr or "")
+    devices: list[str] = []
+    for line in text.splitlines():
+        line = line.strip()
+        m = re.match(r"^device\s+`([^`]+)`\s+is\b", line)
+        if not m:
+            continue
+        devices.append(m.group(1))
+    return devices
 
 
 async def scan_pdf(

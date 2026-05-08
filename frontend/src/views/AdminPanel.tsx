@@ -14,6 +14,11 @@ type Smtp = {
   tls: boolean;
 };
 
+type HardwareOptions = {
+  scanners: string[];
+  printers: string[];
+};
+
 const emptySmtp: Smtp = {
   host: "",
   port: 587,
@@ -28,6 +33,10 @@ export function AdminPanel() {
   const [smtp, setSmtp] = useState<Smtp>(emptySmtp);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [scannerDevice, setScannerDevice] = useState("");
+  const [printerDevice, setPrinterDevice] = useState("");
+  const [usbRootsText, setUsbRootsText] = useState("/media\n/run/media\n/Volumes");
+  const [hardwareOptions, setHardwareOptions] = useState<HardwareOptions>({ scanners: [], printers: [] });
   const [modal, setModal] = useState<{ title: string; message: string; variant: "info" | "error" } | null>(
     null,
   );
@@ -55,6 +64,13 @@ export function AdminPanel() {
         }
         const data = await res.json();
         setSmtp({ ...emptySmtp, ...data.smtp });
+        setScannerDevice(typeof data.scanner_device === "string" ? data.scanner_device : "");
+        setPrinterDevice(typeof data.printer_device === "string" ? data.printer_device : "");
+        setUsbRootsText(Array.isArray(data.usb_roots) && data.usb_roots.length > 0 ? data.usb_roots.join("\n") : "/media\n/run/media\n/Volumes");
+        setHardwareOptions({
+          scanners: Array.isArray(data?.hardware_options?.scanners) ? data.hardware_options.scanners : [],
+          printers: Array.isArray(data?.hardware_options?.printers) ? data.hardware_options.printers : [],
+        });
       } catch (e) {
         setModal({
           title: "Settings",
@@ -81,7 +97,15 @@ export function AdminPanel() {
           "Content-Type": "application/json",
           "X-Admin-Password": pw,
         },
-        body: JSON.stringify({ smtp }),
+        body: JSON.stringify({
+          smtp,
+          scanner_device: scannerDevice,
+          printer_device: printerDevice,
+          usb_roots: usbRootsText
+            .split("\n")
+            .map((x) => x.trim())
+            .filter(Boolean),
+        }),
       });
       if (!res.ok) {
         setModal({ title: "Save", message: await parseErrorDetail(res), variant: "error" });
@@ -121,13 +145,60 @@ export function AdminPanel() {
         <KioskButton variant="ghost" className="min-h-[3rem] px-4 text-base" onClick={() => nav("/")}>
           Home
         </KioskButton>
-        <h2 className="text-xl font-bold flex-1">SMTP</h2>
+        <h2 className="text-xl font-bold flex-1">Admin Settings</h2>
         <KioskButton variant="secondary" className="min-h-[3rem] px-4 text-base" onClick={logout}>
           Log out
         </KioskButton>
       </div>
 
       <div className="flex-1 min-h-0 grid grid-cols-1 gap-2 content-start">
+        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted">Hardware</h3>
+        <label className="text-sm text-kiosk-muted">
+          Scanner device
+          <select
+            className={`${field} mt-1`}
+            value={scannerDevice}
+            onChange={(e) => setScannerDevice(e.target.value)}
+          >
+            <option value="">Auto/default scanner</option>
+            {scannerDevice && !hardwareOptions.scanners.includes(scannerDevice) && (
+              <option value={scannerDevice}>{scannerDevice}</option>
+            )}
+            {hardwareOptions.scanners.map((dev) => (
+              <option key={dev} value={dev}>
+                {dev}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm text-kiosk-muted">
+          Printer queue
+          <select
+            className={`${field} mt-1`}
+            value={printerDevice}
+            onChange={(e) => setPrinterDevice(e.target.value)}
+          >
+            <option value="">Default printer</option>
+            {printerDevice && !hardwareOptions.printers.includes(printerDevice) && (
+              <option value={printerDevice}>{printerDevice}</option>
+            )}
+            {hardwareOptions.printers.map((queue) => (
+              <option key={queue} value={queue}>
+                {queue}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="text-sm text-kiosk-muted">
+          USB roots (one per line)
+          <textarea
+            className={`${field} mt-1 min-h-[6rem]`}
+            value={usbRootsText}
+            onChange={(e) => setUsbRootsText(e.target.value)}
+            spellCheck={false}
+          />
+        </label>
+        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">SMTP</h3>
         <label className="text-sm text-kiosk-muted">
           Server
           <input

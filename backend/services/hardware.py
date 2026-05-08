@@ -66,6 +66,7 @@ class PrinterBridge(ABC):
         *,
         duplex: bool = False,
         job_name: str = "kopi-job",
+        device: str | None = None,
         timeout_sec: int = 120,
     ) -> PrintResult: ...
 
@@ -129,8 +130,12 @@ class RealScannerBridge(ScannerBridge):
         device: str | None = None,
         timeout_sec: int = 300,
     ) -> ScanResult:
-        cmd = build_scanimage_pdf_cmd(duplex_scan=duplex, device=device)
-        log.info("scan_start mode=real duplex=%s cmd=%s", duplex, " ".join(cmd))
+        cmd = build_scanimage_pdf_cmd(
+            duplex_scan=duplex,
+            device=device,
+            include_resolution=True,
+        )
+        log.info("scan_start mode=real duplex=%s device=%r cmd=%s", duplex, device, " ".join(cmd))
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -163,6 +168,53 @@ class RealScannerBridge(ScannerBridge):
 
         err_text = (stderr or b"").decode(errors="replace")
         if proc.returncode != 0:
+            if "--resolution" in err_text and "unrecognized option" in err_text:
+                fallback_cmd = build_scanimage_pdf_cmd(
+                    duplex_scan=duplex,
+                    device=device,
+                    include_resolution=False,
+                )
+                log.warning(
+                    "scan_retry_no_resolution mode=real device=%r cmd=%s",
+                    device,
+                    " ".join(fallback_cmd),
+                )
+                try:
+                    fallback_proc = await asyncio.create_subprocess_exec(
+                        *fallback_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except FileNotFoundError as e:
+                    log.error("scan_fail mode=real reason=binary_missing err=%s", e)
+                    return ScanResult(
+                        ok=False,
+                        stdout=b"",
+                        stderr=str(e),
+                        user_message="Scanner Not Found",
+                    )
+
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        fallback_proc.communicate(),
+                        timeout=timeout_sec,
+                    )
+                except asyncio.TimeoutError:
+                    log.error("scan_timeout mode=real timeout=%ss retry=no_resolution", timeout_sec)
+                    _kill_quiet(fallback_proc)
+                    await fallback_proc.wait()
+                    return ScanResult(
+                        ok=False,
+                        stdout=b"",
+                        stderr="timeout",
+                        user_message="Scanner Busy",
+                    )
+
+                err_text = (stderr or b"").decode(errors="replace")
+                if fallback_proc.returncode == 0 and stdout:
+                    log.info("scan_ok mode=real retry=no_resolution bytes=%d", len(stdout))
+                    return ScanResult(ok=True, stdout=stdout, stderr=err_text, user_message=None)
+
             msg = (
                 classify_scan_error(err_text)
                 or f"Scanner error: {err_text.strip() or proc.returncode}"
@@ -185,18 +237,20 @@ class RealPrinterBridge(PrinterBridge):
         *,
         duplex: bool = False,
         job_name: str = "kopi-job",
+        device: str | None = None,
         timeout_sec: int = 120,
     ) -> PrintResult:
         cmd: list[str] = ["lp", "-t", "application/pdf", "-J", job_name]
         if duplex:
             cmd.extend(["-o", "sides=two-sided-long-edge"])
-        dest = os.environ.get("CUPS_DEST")
+        dest = device or os.environ.get("CUPS_DEST")
         if dest:
             cmd.extend(["-d", dest])
 
         log.info(
-            "print_start mode=real duplex=%s bytes=%d cmd=%s",
+            "print_start mode=real duplex=%s device=%r bytes=%d cmd=%s",
             duplex,
+            device,
             len(pdf_bytes),
             " ".join(cmd),
         )
@@ -269,6 +323,7 @@ class MockPrinterBridge(PrinterBridge):
         *,
         duplex: bool = False,
         job_name: str = "kopi-job",
+        device: str | None = None,
         timeout_sec: int = 120,
     ) -> PrintResult:
         delay = random.uniform(1.0, 2.0)
@@ -276,8 +331,9 @@ class MockPrinterBridge(PrinterBridge):
         if duplex:
             cmd_preview.extend(["-o", "sides=two-sided-long-edge"])
         log.info(
-            "print_start mode=mock duplex=%s bytes=%d cmd=%s delay=%.2fs",
+            "print_start mode=mock duplex=%s device=%r bytes=%d cmd=%s delay=%.2fs",
             duplex,
+            device,
             len(pdf_bytes),
             " ".join(cmd_preview),
             delay,

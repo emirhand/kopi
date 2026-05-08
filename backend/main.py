@@ -125,6 +125,9 @@ class SmtpSettings(BaseModel):
 
 class AdminSettingsUpdate(BaseModel):
     smtp: SmtpSettings
+    scanner_device: str = ""
+    printer_device: str = ""
+    usb_roots: list[str] = Field(default_factory=list)
 
 
 @app.get("/api/health")
@@ -134,7 +137,11 @@ def health():
 
 @app.post("/api/scan")
 async def api_scan(body: ScanBody):
-    scan = await scanner.scan_pdf(duplex=body.duplex)
+    settings = load_settings()
+    scan = await scanner.scan_pdf(
+        duplex=body.duplex,
+        device=str(settings.get("scanner_device", "")).strip() or None,
+    )
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
     scan_id = await SCAN_STORE.put(scan.stdout)
@@ -143,6 +150,7 @@ async def api_scan(body: ScanBody):
 
 @app.post("/api/print")
 async def api_print(body: PrintBody):
+    settings = load_settings()
     try:
         pdf = await SCAN_STORE.pop(body.scan_id)
     except KeyError:
@@ -151,7 +159,12 @@ async def api_print(body: PrintBody):
             detail="Scan expired or not found. Please scan again.",
         ) from None
 
-    result = await printer.print_pdf(pdf, duplex=body.duplex, job_name="kopi-copy")
+    result = await printer.print_pdf(
+        pdf,
+        duplex=body.duplex,
+        job_name="kopi-copy",
+        device=str(settings.get("printer_device", "")).strip() or None,
+    )
     if not result.ok:
         await SCAN_STORE.put(pdf)
         raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
@@ -161,7 +174,10 @@ async def api_print(body: PrintBody):
 @app.post("/api/scan/email")
 async def api_scan_email(body: ScanEmailBody):
     settings = load_settings()
-    scan = await scanner.scan_pdf(duplex=False)
+    scan = await scanner.scan_pdf(
+        duplex=False,
+        device=str(settings.get("scanner_device", "")).strip() or None,
+    )
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
 
@@ -178,12 +194,19 @@ async def api_scan_email(body: ScanEmailBody):
 
 @app.post("/api/scan/usb")
 async def api_scan_usb():
+    settings = load_settings()
     try:
-        mount = usb_manager.require_usb_path()
+        roots = settings.get("usb_roots", [])
+        mount = usb_manager.require_usb_path(
+            roots=[str(x).strip() for x in roots if str(x).strip()] if isinstance(roots, list) else None
+        )
     except FileNotFoundError:
         raise HTTPException(status_code=400, detail="USB Not Found")
 
-    scan = await scanner.scan_pdf(duplex=False)
+    scan = await scanner.scan_pdf(
+        duplex=False,
+        device=str(settings.get("scanner_device", "")).strip() or None,
+    )
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
 
@@ -211,7 +234,16 @@ def api_admin_settings(x_admin_password: Optional[str] = Header(default=None, al
     settings = load_settings()
     if not verify_admin_password(settings, x_admin_password):
         raise HTTPException(status_code=403, detail="Invalid admin password")
-    return {"smtp": settings.get("smtp", {})}
+    return {
+        "smtp": settings.get("smtp", {}),
+        "scanner_device": settings.get("scanner_device", ""),
+        "printer_device": settings.get("printer_device", ""),
+        "usb_roots": settings.get("usb_roots", []),
+        "hardware_options": {
+            "scanners": scanner.list_scan_devices(),
+            "printers": printer.list_printer_queues(),
+        },
+    }
 
 
 @app.put("/api/admin/settings")
@@ -226,6 +258,9 @@ def api_admin_settings_put(
         raise HTTPException(status_code=403, detail="Invalid admin password")
 
     settings["smtp"] = body.smtp.model_dump()
+    settings["scanner_device"] = body.scanner_device.strip()
+    settings["printer_device"] = body.printer_device.strip()
+    settings["usb_roots"] = [x.strip() for x in body.usb_roots if x.strip()]
     save_settings(settings)
     return {"ok": True, "message": "Settings saved"}
 
