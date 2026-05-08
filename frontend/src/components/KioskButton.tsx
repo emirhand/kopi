@@ -25,6 +25,8 @@ export type KioskButtonProps = ButtonHTMLAttributes<HTMLButtonElement> & {
   layout?: "default" | "tile";
   /** Small badge e.g. "Coming soon" */
   badge?: ReactNode;
+  /** Selected / active state for tile grids (e.g. Copy settings) */
+  tileActive?: boolean;
 };
 
 export function KioskButton({
@@ -34,9 +36,14 @@ export function KioskButton({
   icon,
   layout = "default",
   badge,
+  tileActive,
   ...rest
 }: KioskButtonProps) {
   const industrialShadow = "shadow-[0_1px_2px_rgba(0,0,0,0.45)]";
+  const tileActiveRing =
+    tileActive === true
+      ? "ring-2 ring-emerald-500 shadow-[0_0_16px_rgba(16,185,129,0.35)] border-emerald-500/70"
+      : "";
 
   if (layout === "tile") {
     return (
@@ -44,11 +51,12 @@ export function KioskButton({
         type="button"
         className={`
           relative flex aspect-square w-full max-h-full flex-col items-center justify-center gap-2
-          rounded-3xl border-2 px-3 py-4 font-kiosk transition-[transform,background-color,opacity]
+          rounded-3xl border-2 px-3 py-4 font-kiosk transition-[transform,background-color,opacity,box-shadow]
           select-none active:scale-95 disabled:pointer-events-none disabled:opacity-40
           [&_svg]:shrink-0
           ${industrialShadow}
           ${variants[variant]}
+          ${tileActiveRing}
           ${className}
         `}
         {...rest}

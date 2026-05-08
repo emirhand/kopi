@@ -8,11 +8,12 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,7 @@ log = logging.getLogger("kopi.api")
 
 APP_ROOT = Path(__file__).resolve().parent
 SETTINGS_PATH = Path(os.environ.get("SETTINGS_PATH", APP_ROOT / "config" / "settings.json"))
+ARCHIVE_DIR = Path(os.environ.get("KOPI_ARCHIVE_DIR", str(APP_ROOT / "data" / "archive")))
 
 SCAN_TTL_SEC = int(os.environ.get("KOPI_SCAN_TTL_SEC", "300"))
 ID_SCAN_TTL_SEC = int(os.environ.get("KOPI_ID_SCAN_TTL_SEC", "600"))
@@ -212,6 +214,45 @@ def verify_admin_password(settings: dict, password: str) -> bool:
     return bool(password) and password == expected
 
 
+def _dpi_from_resolution_label(label: str) -> int:
+    return 300 if (label or "").lower() == "high" else 150
+
+
+def _normalize_scan_format(fmt: str) -> str:
+    f = (fmt or "pdf").lower()
+    return "jpeg" if f in ("jpg", "jpeg") else "pdf"
+
+
+def _scan_file_extension(fmt_norm: str) -> str:
+    return "jpg" if fmt_norm == "jpeg" else "pdf"
+
+
+def _finalize_scan_bytes(
+    raw: bytes,
+    *,
+    fmt_norm: str,
+    remove_blank_pages: bool,
+    dpi: int,
+) -> bytes:
+    if fmt_norm != "pdf" or not remove_blank_pages:
+        return raw
+    fd_in, path_in = tempfile.mkstemp(prefix="kopi-scan-", suffix=".pdf")
+    os.close(fd_in)
+    fd_out, path_out = tempfile.mkstemp(prefix="kopi-scan-blank-", suffix=".pdf")
+    os.close(fd_out)
+    p_in = Path(path_in)
+    p_out = Path(path_out)
+    try:
+        p_in.write_bytes(raw)
+        ok, err = processor.remove_blank_pages_from_pdf(p_in, p_out, density=min(dpi, 300))
+        if not ok:
+            raise HTTPException(status_code=400, detail=err or "Blank page removal failed")
+        return p_out.read_bytes()
+    finally:
+        p_in.unlink(missing_ok=True)
+        p_out.unlink(missing_ok=True)
+
+
 app = FastAPI(title="Linux Smart Copier Appliance", version="0.1.0")
 
 app.add_middleware(
@@ -225,6 +266,8 @@ app.add_middleware(
 
 class ScanBody(BaseModel):
     duplex: bool = False
+    color: bool = True
+    resolution_dpi: int = Field(300, ge=72, le=600)
 
 
 class PrintBody(BaseModel):
@@ -234,6 +277,28 @@ class PrintBody(BaseModel):
 
 class ScanEmailBody(BaseModel):
     recipient: str = Field(..., min_length=3)
+    duplex: bool = False
+    color: bool = True
+    resolution: Literal["standard", "high"] = "standard"
+    output_format: Literal["pdf", "jpg", "jpeg"] = "pdf"
+    remove_blank_pages: bool = False
+
+
+class ScanUsbBody(BaseModel):
+    mount_path: Optional[str] = None
+    duplex: bool = False
+    color: bool = True
+    resolution: Literal["standard", "high"] = "standard"
+    output_format: Literal["pdf", "jpg", "jpeg"] = "pdf"
+    remove_blank_pages: bool = False
+
+
+class ScanArchiveBody(BaseModel):
+    duplex: bool = False
+    color: bool = True
+    resolution: Literal["standard", "high"] = "standard"
+    output_format: Literal["pdf", "jpg", "jpeg"] = "pdf"
+    remove_blank_pages: bool = False
 
 
 class AdminVerifyBody(BaseModel):
@@ -268,10 +333,6 @@ class IdScanEmailBody(BaseModel):
 
 class UsbMountBody(BaseModel):
     device: str = Field(..., min_length=4, description="Block device e.g. /dev/sdb1")
-
-
-class ScanUsbBody(BaseModel):
-    mount_path: Optional[str] = None
 
 
 @app.get("/api/health")
@@ -450,6 +511,8 @@ async def api_scan(body: ScanBody):
     scan = await scanner.scan_copy_image_file(
         duplex=body.duplex,
         device=str(settings.get("scanner_device", "")).strip() or None,
+        resolution_dpi=body.resolution_dpi,
+        color=body.color,
     )
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
@@ -496,15 +559,29 @@ async def api_print(body: PrintBody):
 @app.post("/api/scan/email")
 async def api_scan_email(body: ScanEmailBody):
     settings = load_settings()
+    dpi = _dpi_from_resolution_label(body.resolution)
+    fmt_norm = _normalize_scan_format(body.output_format)
     scan = await scanner.scan_pdf(
-        duplex=False,
+        duplex=body.duplex,
         device=str(settings.get("scanner_device", "")).strip() or None,
+        resolution_dpi=dpi,
+        color=body.color,
+        output_format=body.output_format,
     )
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
 
-    ok, err = mailer.send_pdf_email(
+    payload = _finalize_scan_bytes(
         scan.stdout,
+        fmt_norm=fmt_norm,
+        remove_blank_pages=body.remove_blank_pages,
+        dpi=dpi,
+    )
+    ext = _scan_file_extension(fmt_norm)
+    filename = f"scan.{ext}"
+    ok, err = mailer.send_attachment_email(
+        payload,
+        filename=filename,
         to_addr=body.recipient.strip(),
         subject=f"Scan {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
         smtp=settings.get("smtp", {}),
@@ -525,19 +602,64 @@ async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)):
     except PermissionError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    dpi = _dpi_from_resolution_label(body.resolution)
+    fmt_norm = _normalize_scan_format(body.output_format)
     scan = await scanner.scan_pdf(
-        duplex=False,
+        duplex=body.duplex,
         device=str(settings.get("scanner_device", "")).strip() or None,
+        resolution_dpi=dpi,
+        color=body.color,
+        output_format=body.output_format,
     )
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
 
-    name = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.pdf"
+    payload = _finalize_scan_bytes(
+        scan.stdout,
+        fmt_norm=fmt_norm,
+        remove_blank_pages=body.remove_blank_pages,
+        dpi=dpi,
+    )
+    ext = _scan_file_extension(fmt_norm)
+    name = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.{ext}"
     dest = mount / name
     try:
-        dest.write_bytes(scan.stdout)
+        dest.write_bytes(payload)
     except OSError as e:
         raise HTTPException(status_code=400, detail=f"Could not write to USB: {e}") from e
+
+    return {"ok": True, "message": f"Saved to {dest}"}
+
+
+@app.post("/api/scan/archive")
+async def api_scan_archive(body: ScanArchiveBody):
+    settings = load_settings()
+    dpi = _dpi_from_resolution_label(body.resolution)
+    fmt_norm = _normalize_scan_format(body.output_format)
+    scan = await scanner.scan_pdf(
+        duplex=body.duplex,
+        device=str(settings.get("scanner_device", "")).strip() or None,
+        resolution_dpi=dpi,
+        color=body.color,
+        output_format=body.output_format,
+    )
+    if not scan.ok:
+        raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
+
+    payload = _finalize_scan_bytes(
+        scan.stdout,
+        fmt_norm=fmt_norm,
+        remove_blank_pages=body.remove_blank_pages,
+        dpi=dpi,
+    )
+    ext = _scan_file_extension(fmt_norm)
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    name = f"scan-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:8]}.{ext}"
+    dest = ARCHIVE_DIR / name
+    try:
+        dest.write_bytes(payload)
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=f"Could not write archive file: {e}") from e
 
     return {"ok": True, "message": f"Saved to {dest}"}
 

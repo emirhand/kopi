@@ -1,3 +1,4 @@
+import type { CSSProperties } from "react";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiUrl, parseErrorDetail } from "../api";
@@ -6,9 +7,17 @@ import { ProgressBar } from "../components/ProgressBar";
 
 type Stage = "idle" | "scanning" | "printing" | "done" | "error";
 
+/** Matches Home main grid aspect — Back top-left, Start bottom-right (Admin corner). */
+const GRID_STYLE: CSSProperties = {
+  width: "min(92vw, calc((100dvh - 10rem) * 3 / 2))",
+  height:
+    "min(calc(100dvh - 10rem), calc(min(92vw, (100dvh - 10rem) * 3 / 2) * 2 / 3))",
+};
+
 export function CopyMenu() {
   const nav = useNavigate();
   const [duplex, setDuplex] = useState(false);
+  const [color, setColor] = useState(true);
   const [stage, setStage] = useState<Stage>("idle");
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
   const busyLock = useRef(false);
@@ -36,7 +45,11 @@ export function CopyMenu() {
       const scanRes = await fetch(apiUrl("/api/scan"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ duplex }),
+        body: JSON.stringify({
+          duplex,
+          color,
+          resolution_dpi: 300,
+        }),
       });
       if (!scanRes.ok) {
         const msg = await parseErrorDetail(scanRes);
@@ -84,69 +97,116 @@ export function CopyMenu() {
   }
 
   return (
-    <div className="h-[100dvh] w-[100dvw] flex flex-col bg-kiosk-bg overflow-hidden p-3 md:p-4 gap-3">
-      <div className="shrink-0 flex items-center gap-3">
-        <KioskButton
-          variant="ghost"
-          className="min-h-[3.5rem] px-5 text-lg"
-          disabled={hardwareBusy}
-          onClick={() => nav("/")}
-        >
-          ← Back
-        </KioskButton>
-        <h2 className="text-2xl md:text-3xl font-black">Copy</h2>
-      </div>
+    <div className="flex h-[100dvh] w-[100dvw] flex-col overflow-hidden bg-kiosk-industrial-bezel text-zinc-100">
+      <header className="shrink-0 px-4 pt-3 text-center">
+        <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Copier</p>
+        <h1 className="text-xl font-black uppercase tracking-wide text-zinc-100 md:text-2xl">Copy</h1>
+      </header>
 
-      <KioskButton
-        variant={duplex ? "primary" : "secondary"}
-        className="shrink-0 w-full text-xl md:text-2xl min-h-[4rem] ring-2 ring-white/10 active:scale-[0.99]"
-        disabled={stage !== "idle"}
-        onClick={() => setDuplex((v) => !v)}
-      >
-        Duplex: {duplex ? "On" : "Off"}
-      </KioskButton>
-
-      <div className="flex-1 min-h-0 flex flex-col gap-4">
-        {stage === "scanning" && <ProgressBar label="Scanning…" variant="scan" />}
-        {stage === "printing" && <ProgressBar label="Printing…" variant="print" />}
+      <main className="flex min-h-0 flex-1 items-center justify-center px-3 py-2 md:px-6">
+        {stage === "scanning" && (
+          <div className="w-full max-w-xl px-2">
+            <ProgressBar label="Scanning…" variant="scan" />
+          </div>
+        )}
+        {stage === "printing" && (
+          <div className="w-full max-w-xl px-2">
+            <ProgressBar label="Printing…" variant="print" />
+          </div>
+        )}
 
         {stage === "done" && (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="w-full max-w-xl rounded-3xl border-4 border-kiosk-accent2 bg-kiosk-panel p-8 text-center shadow-xl shadow-black/50">
-              <p className="text-3xl md:text-4xl font-black text-kiosk-text">Done</p>
-              <p className="mt-3 text-lg text-kiosk-muted">Your print job was submitted.</p>
-            </div>
+          <div className="flex max-w-xl flex-col items-center rounded-3xl border-2 border-emerald-500/40 bg-kiosk-industrial-slate/80 p-8 text-center shadow-xl">
+            <p className="text-3xl font-black text-zinc-100 md:text-4xl">Done</p>
+            <p className="mt-3 text-lg text-zinc-400">Your print job was submitted.</p>
           </div>
         )}
 
         {stage === "error" && errorDetail && (
-          <div className="flex-1 flex items-center justify-center">
-            <div className="w-full max-w-xl rounded-3xl border-4 border-kiosk-danger bg-kiosk-panel p-6 md:p-8 shadow-xl shadow-black/50">
-              <p className="text-2xl md:text-3xl font-black text-kiosk-text">Check hardware</p>
-              <p className="mt-3 text-lg text-kiosk-muted whitespace-pre-wrap leading-snug">
-                {errorDetail}
-              </p>
-              <KioskButton
-                variant="primary"
-                className="mt-6 w-full text-2xl ring-2 ring-white/10 active:scale-[0.99]"
-                onClick={resetFromError}
-              >
-                Try Again
-              </KioskButton>
-            </div>
+          <div className="max-h-[min(70dvh,28rem)] w-full max-w-xl overflow-auto rounded-3xl border-2 border-red-500/50 bg-kiosk-industrial-slate/90 p-6 shadow-xl">
+            <p className="text-2xl font-black text-zinc-100">Check hardware</p>
+            <p className="mt-3 whitespace-pre-wrap text-lg leading-snug text-zinc-400">{errorDetail}</p>
+            <KioskButton
+              variant="primary"
+              className="mt-6 min-h-[3.5rem] w-full max-w-sm mx-auto text-xl"
+              onClick={resetFromError}
+            >
+              Try Again
+            </KioskButton>
           </div>
         )}
 
         {stage === "idle" && (
-          <KioskButton
-            variant="primary"
-            className="flex-1 min-h-0 w-full text-3xl md:text-5xl font-black ring-2 ring-white/10 active:scale-[0.99]"
-            onClick={startCopy}
+          <div
+            className="grid min-h-0 grid-cols-3 grid-rows-2 gap-3 md:gap-4"
+            style={GRID_STYLE}
           >
-            Start Copy
-          </KioskButton>
+            <KioskButton
+              layout="tile"
+              variant="industrialMuted"
+              className="min-h-0 min-w-0"
+              disabled={hardwareBusy}
+              onClick={() => nav("/")}
+            >
+              ← Back
+            </KioskButton>
+
+            <KioskButton
+              layout="tile"
+              variant="industrial"
+              tileActive={!duplex}
+              className="min-h-0 min-w-0"
+              disabled={hardwareBusy}
+              onClick={() => setDuplex(false)}
+            >
+              Single-Sided
+            </KioskButton>
+
+            <KioskButton
+              layout="tile"
+              variant="industrial"
+              tileActive={duplex}
+              className="min-h-0 min-w-0"
+              disabled={hardwareBusy}
+              onClick={() => setDuplex(true)}
+            >
+              Duplex
+            </KioskButton>
+
+            <KioskButton
+              layout="tile"
+              variant="industrial"
+              tileActive={color}
+              className="min-h-0 min-w-0"
+              disabled={hardwareBusy}
+              onClick={() => setColor(true)}
+            >
+              Color
+            </KioskButton>
+
+            <KioskButton
+              layout="tile"
+              variant="industrial"
+              tileActive={!color}
+              className="min-h-0 min-w-0"
+              disabled={hardwareBusy}
+              onClick={() => setColor(false)}
+            >
+              B&amp;W
+            </KioskButton>
+
+            <KioskButton
+              layout="tile"
+              variant="industrial"
+              className="min-h-0 min-w-0 ring-1 ring-amber-500/30"
+              disabled={hardwareBusy}
+              onClick={startCopy}
+            >
+              Start
+            </KioskButton>
+          </div>
         )}
-      </div>
+      </main>
     </div>
   );
 }

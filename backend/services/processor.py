@@ -133,6 +133,68 @@ def apply_ocrmypdf(in_pdf: Path, out_pdf: Path, timeout: float = 300.0) -> tuple
     return True, ""
 
 
+def remove_blank_pages_from_pdf(
+    in_pdf: Path,
+    out_pdf: Path,
+    *,
+    density: int = 150,
+    blank_mean_threshold: float = 0.988,
+) -> tuple[bool, str]:
+    """
+    Rasterize each PDF page with ImageMagick, drop pages whose grayscale mean is above
+    ``blank_mean_threshold`` (nearly white). If every page would be removed, keep the first page.
+    """
+    in_pdf = in_pdf.resolve()
+    out_pdf = out_pdf.resolve()
+    if not in_pdf.is_file():
+        return False, "Missing input PDF"
+
+    with tempfile.TemporaryDirectory(prefix="kopi-blank-") as td:
+        tdir = Path(td)
+        pattern = str(tdir / "page-%03d.png")
+        rc, msg = _run_magick(
+            ["-density", str(density), str(in_pdf), pattern],
+            timeout=300,
+        )
+        if rc != 0:
+            return False, msg or "magick rasterize failed"
+
+        pages = sorted(tdir.glob("page-*.png"))
+        if not pages:
+            return False, "No pages rasterized from PDF"
+
+        kept: list[Path] = []
+        for p in pages:
+            rc_m, mean_s = _run_magick(
+                [str(p), "-colorspace", "Gray", "-format", "%[fx:mean]", "info:"],
+                timeout=60,
+            )
+            if rc_m != 0:
+                kept.append(p)
+                continue
+            try:
+                mean = float((mean_s or "").strip())
+            except ValueError:
+                kept.append(p)
+                continue
+            if mean < blank_mean_threshold:
+                kept.append(p)
+
+        if not kept:
+            kept = [pages[0]]
+
+        args: list[str] = []
+        for k in kept:
+            args.append(str(k))
+        args.append(str(out_pdf))
+        rc2, msg2 = _run_magick(args, timeout=180)
+        if rc2 != 0:
+            return False, msg2 or "magick rebuild pdf failed"
+
+    log.info("remove_blank_pages_ok kept=%d of %d out=%s", len(kept), len(pages), out_pdf)
+    return True, ""
+
+
 def pdf_to_preview_png_base64(pdf_path: Path, max_width: int = 1200) -> tuple[str | None, str]:
     """Rasterize first PDF page to PNG, return base64 or error."""
     with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:

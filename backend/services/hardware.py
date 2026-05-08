@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from .printer import PrintResult, classify_print_error
-from .scanner import ScanResult, ScanFileResult, build_scanimage_pdf_cmd, classify_scan_error
+from .scanner import ScanResult, ScanFileResult, build_scanimage_document_cmd, classify_scan_error
 
 log = logging.getLogger("kopi.hardware")
 
@@ -56,6 +56,9 @@ class ScannerBridge(ABC):
         duplex: bool = False,
         device: str | None = None,
         timeout_sec: int = 300,
+        resolution_dpi: int = 300,
+        color: bool = True,
+        output_format: str = "pdf",
     ) -> ScanResult: ...
 
     @abstractmethod
@@ -148,6 +151,16 @@ def _normalize_pdf_bytes(raw: bytes) -> bytes:
     return raw[start : end + len(b"%%EOF")]
 
 
+def _trim_jpeg_bytes(raw: bytes) -> bytes:
+    """Trim scanner stdout to one JPEG SOI…EOI envelope."""
+    if not raw.startswith(b"\xff\xd8"):
+        return raw
+    end = raw.rfind(b"\xff\xd9")
+    if end < 0:
+        return raw
+    return raw[: end + 2]
+
+
 def _build_mock_pdf(text: str) -> bytes:
     """Hand-rolled minimal one-page PDF stamped with ``text``. No external deps."""
     safe = "".join(c if 32 <= ord(c) < 127 else "?" for c in text)[:80]
@@ -190,14 +203,29 @@ class RealScannerBridge(ScannerBridge):
         duplex: bool = False,
         device: str | None = None,
         timeout_sec: int = 300,
+        resolution_dpi: int = 300,
+        color: bool = True,
+        output_format: str = "pdf",
     ) -> ScanResult:
-        cmd = build_scanimage_pdf_cmd(
+        fmt_key = "jpeg" if output_format.lower() in ("jpg", "jpeg") else "pdf"
+        cmd = build_scanimage_document_cmd(
             duplex_scan=duplex,
             device=device,
+            output_format=output_format,
+            resolution_dpi=resolution_dpi,
+            color=color,
             include_resolution=True,
             include_mode=True,
         )
-        log.info("scan_start mode=real duplex=%s device=%r cmd=%s", duplex, device, " ".join(cmd))
+        log.info(
+            "scan_start mode=real duplex=%s fmt=%s dpi=%s color=%s device=%r cmd=%s",
+            duplex,
+            fmt_key,
+            resolution_dpi,
+            color,
+            device,
+            " ".join(cmd),
+        )
 
         async def run_once(run_cmd: list[str]) -> tuple[int, bytes, str]:
             try:
@@ -217,7 +245,7 @@ class RealScannerBridge(ScannerBridge):
                 _kill_quiet(proc)
                 await proc.wait()
                 return 124, b"", "timeout"
-            return proc.returncode, stdout, (stderr or b"").decode(errors="replace")
+            return proc.returncode, stdout or b"", (stderr or b"").decode(errors="replace")
 
         rc, stdout, err_text = await run_once(cmd)
         if rc == 127:
@@ -226,9 +254,12 @@ class RealScannerBridge(ScannerBridge):
             return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Scanner Busy")
 
         if rc != 0 and "--resolution" in err_text and "unrecognized option" in err_text:
-            fallback_cmd = build_scanimage_pdf_cmd(
+            fallback_cmd = build_scanimage_document_cmd(
                 duplex_scan=duplex,
                 device=device,
+                output_format=output_format,
+                resolution_dpi=resolution_dpi,
+                color=color,
                 include_resolution=False,
                 include_mode=True,
             )
@@ -237,13 +268,14 @@ class RealScannerBridge(ScannerBridge):
             cmd = fallback_cmd
 
         if rc != 0 and "initialize parameter is error" in err_text.lower():
-            safe_cmd = build_scanimage_pdf_cmd(
+            safe_cmd = build_scanimage_document_cmd(
                 duplex_scan=False,
                 device=device,
+                output_format=output_format,
+                resolution_dpi=resolution_dpi,
+                color=color,
                 include_resolution=False,
                 include_mode=False,
-                source="Flatbed",
-                include_output_file_flag=False,
             )
             log.warning("scan_retry_safe_profile mode=real device=%r cmd=%s", device, " ".join(safe_cmd))
             rc, stdout, err_text = await run_once(safe_cmd)
@@ -262,21 +294,32 @@ class RealScannerBridge(ScannerBridge):
             )
             log.error("scan_fail mode=real rc=%s msg=%r", rc, msg)
             return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
-        stdout = _normalize_pdf_bytes(stdout)
+
+        if fmt_key == "pdf":
+            stdout = _normalize_pdf_bytes(stdout)
+        else:
+            stdout = _trim_jpeg_bytes(stdout)
+
         if not stdout:
-            no_data_cmd = build_scanimage_pdf_cmd(
+            no_data_cmd = build_scanimage_document_cmd(
                 duplex_scan=False,
                 device=device,
+                output_format=output_format,
+                resolution_dpi=resolution_dpi,
+                color=color,
                 include_resolution=False,
                 include_mode=False,
-                source="Flatbed",
-                include_output_file_flag=False,
             )
             log.warning("scan_retry_no_data_flatbed mode=real device=%r cmd=%s", device, " ".join(no_data_cmd))
             retry_rc, retry_stdout, retry_err = await run_once(no_data_cmd)
             if retry_rc == 0 and retry_stdout:
-                log.info("scan_ok mode=real retry=no_data_flatbed bytes=%d", len(retry_stdout))
-                return ScanResult(ok=True, stdout=retry_stdout, stderr=retry_err, user_message=None)
+                if fmt_key == "pdf":
+                    retry_stdout = _normalize_pdf_bytes(retry_stdout)
+                else:
+                    retry_stdout = _trim_jpeg_bytes(retry_stdout)
+                if retry_stdout:
+                    log.info("scan_ok mode=real retry=no_data_flatbed bytes=%d", len(retry_stdout))
+                    return ScanResult(ok=True, stdout=retry_stdout, stderr=retry_err, user_message=None)
 
             msg = classify_scan_error(retry_err or err_text) or "Scanner returned no data"
             if _verbose_hardware_errors():
@@ -286,11 +329,19 @@ class RealScannerBridge(ScannerBridge):
                 )
             log.error("scan_fail mode=real reason=empty msg=%r", msg)
             return ScanResult(ok=False, stdout=b"", stderr=(retry_err or err_text), user_message=msg)
-        if not stdout.startswith(b"%PDF-") or b"%%EOF" not in stdout:
-            msg = "Scanner returned non-PDF data; check scanner backend format support."
+
+        if fmt_key == "pdf":
+            if not stdout.startswith(b"%PDF-") or b"%%EOF" not in stdout:
+                msg = "Scanner returned non-PDF data; check scanner backend format support."
+                if _verbose_hardware_errors():
+                    msg += f" [device={device or 'default'} cmd={' '.join(cmd)}]"
+                log.error("scan_fail mode=real reason=non_pdf msg=%r", msg)
+                return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
+        elif not stdout.startswith(b"\xff\xd8\xff"):
+            msg = "Scanner returned non-JPEG data; check scanner backend format support."
             if _verbose_hardware_errors():
                 msg += f" [device={device or 'default'} cmd={' '.join(cmd)}]"
-            log.error("scan_fail mode=real reason=non_pdf msg=%r", msg)
+            log.error("scan_fail mode=real reason=non_jpeg msg=%r", msg)
             return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
 
         log.info("scan_ok mode=real bytes=%d", len(stdout))
@@ -551,17 +602,46 @@ class MockScannerBridge(ScannerBridge):
         duplex: bool = False,
         device: str | None = None,
         timeout_sec: int = 300,
+        resolution_dpi: int = 300,
+        color: bool = True,
+        output_format: str = "pdf",
     ) -> ScanResult:
-        _ = timeout_sec
+        _ = timeout_sec, resolution_dpi, color
         delay = random.uniform(3.0, 5.0)
         log.info(
-            "scan_start mode=mock duplex=%s device=%r delay=%.2fs",
+            "scan_start mode=mock duplex=%s fmt=%s device=%r delay=%.2fs",
             duplex,
+            output_format,
             device,
             delay,
         )
         await asyncio.sleep(delay)
         ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        if output_format.lower() in ("jpg", "jpeg"):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "magick",
+                    "xc:white",
+                    "-resize",
+                    "400x600!",
+                    "jpeg:-",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                jpeg_out, magick_err = await asyncio.wait_for(proc.communicate(), timeout=15)
+                err_txt = (magick_err or b"").decode(errors="replace")
+                if proc.returncode == 0 and jpeg_out and jpeg_out.startswith(b"\xff\xd8"):
+                    log.info("scan_ok mode=mock jpeg bytes=%d", len(jpeg_out))
+                    return ScanResult(ok=True, stdout=jpeg_out, stderr=err_txt, user_message=None)
+            except (FileNotFoundError, asyncio.TimeoutError, OSError) as e:
+                log.warning("mock_jpeg_fail reason=%s", e)
+            return ScanResult(
+                ok=False,
+                stdout=b"",
+                stderr="magick failed or unavailable",
+                user_message="Mock JPEG requires ImageMagick (`magick`) on PATH",
+            )
+
         body = f"MOCK SCAN {ts}{' (duplex)' if duplex else ''}"
         pdf = _build_mock_pdf(body)
         log.info("scan_ok mode=mock bytes=%d", len(pdf))

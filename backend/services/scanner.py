@@ -66,23 +66,67 @@ def build_scanimage_pdf_cmd(
     include_mode: bool = True,
     source: str | None = None,
     include_output_file_flag: bool = True,
+    resolution_override: str | None = None,
+    mode_override: str | None = None,
 ) -> list[str]:
     """Arguments for `scanimage` emitting PDF on stdout (ends with `-o -`)."""
     env = os.environ.copy()
     cmd: list[str] = ["scanimage", "--format=pdf"]
     if include_mode:
-        cmd.extend(["--mode", env.get("SCAN_MODE", "Color")])
+        cmd.extend(["--mode", mode_override or env.get("SCAN_MODE", "Color")])
     if include_resolution:
-        cmd.extend(["--resolution", env.get("SCAN_RESOLUTION", "300")])
+        cmd.extend(["--resolution", resolution_override or env.get("SCAN_RESOLUTION", "300")])
 
     dev = device or env.get("SCAN_DEVICE")
     if dev:
         cmd.extend(["-d", dev])
 
     if duplex_scan:
-        cmd.extend(["--source", "ADF", "--duplex"])
+        cmd.extend(["--source", "ADF Duplex"])
     elif source:
         cmd.extend(["--source", source])
+
+    extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
+    if extra:
+        cmd.extend(extra.split())
+
+    if include_output_file_flag:
+        cmd.extend(["-o", "-"])
+    return cmd
+
+
+def build_scanimage_document_cmd(
+    *,
+    duplex_scan: bool = False,
+    device: str | None = None,
+    output_format: str = "pdf",
+    resolution_dpi: int = 300,
+    color: bool = True,
+    include_resolution: bool = True,
+    include_mode: bool = True,
+    include_output_file_flag: bool = True,
+) -> list[str]:
+    """
+    Unified scanimage argv for document scans (PDF or JPEG on stdout).
+    Duplex uses ``--source ADF Duplex`` per appliance conventions.
+    """
+    env = os.environ.copy()
+    fmt = "jpeg" if output_format.lower() in ("jpg", "jpeg") else "pdf"
+    cmd: list[str] = ["scanimage", f"--format={fmt}"]
+    if include_mode:
+        mode = "Color" if color else "Gray"
+        cmd.extend(["--mode", mode])
+    if include_resolution:
+        cmd.extend(["--resolution", str(resolution_dpi)])
+
+    dev = device or env.get("SCAN_DEVICE")
+    if dev:
+        cmd.extend(["-d", dev])
+
+    if duplex_scan:
+        cmd.extend(["--source", "ADF Duplex"])
+    else:
+        cmd.extend(["--source", "Flatbed"])
 
     extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
     if extra:
@@ -130,16 +174,27 @@ async def scan_pdf(
     duplex: bool = False,
     device: str | None = None,
     timeout_sec: int = 300,
+    resolution_dpi: int = 300,
+    color: bool = True,
+    output_format: str = "pdf",
 ) -> ScanResult:
-    """Run ``scanimage`` (or Mock) and capture PDF bytes on stdout."""
+    """Run ``scanimage`` (or Mock) and capture document bytes on stdout."""
     from .hardware import get_scanner
 
     result = await get_scanner().scan_pdf(
-        duplex=duplex, device=device, timeout_sec=timeout_sec
+        duplex=duplex,
+        device=device,
+        timeout_sec=timeout_sec,
+        resolution_dpi=resolution_dpi,
+        color=color,
+        output_format=output_format,
     )
     log.info(
-        "scan_facade duplex=%s ok=%s bytes=%d user_message=%r",
+        "scan_facade duplex=%s fmt=%s dpi=%s color=%s ok=%s bytes=%d user_message=%r",
         duplex,
+        output_format,
+        resolution_dpi,
+        color,
         result.ok,
         len(result.stdout) if result.ok else 0,
         result.user_message,
@@ -151,6 +206,8 @@ async def scan_copy_image_file(
     *,
     duplex: bool = False,
     device: str | None = None,
+    resolution_dpi: int = 300,
+    color: bool = True,
     timeout_sec: int = 300,
 ) -> ScanFileResult:
     """Run ``scanimage`` to a temporary PNG file for robust copy-print path."""
@@ -159,12 +216,22 @@ async def scan_copy_image_file(
     os.close(fd)
     output = Path(file_path)
 
-    base_cmd = ["scanimage", "--format=png"]
+    mode = "Color" if color else "Gray"
+    base_cmd = [
+        "scanimage",
+        "--format=png",
+        "--resolution",
+        str(resolution_dpi),
+        "--mode",
+        mode,
+    ]
     dev = device or env.get("SCAN_DEVICE")
     if dev:
         base_cmd.extend(["-d", dev])
     if duplex:
-        base_cmd.extend(["--source", "ADF", "--duplex"])
+        base_cmd.extend(["--source", "ADF Duplex"])
+    else:
+        base_cmd.extend(["--source", "Flatbed"])
     cmd = base_cmd + ["-o", file_path]
 
     async def run(run_cmd: list[str]) -> tuple[int, str]:
@@ -184,10 +251,24 @@ async def scan_copy_image_file(
 
     rc, err_text = await run(cmd)
     if rc != 0 and "--resolution" in err_text and "unrecognized option" in err_text:
-        cmd = base_cmd + ["-o", file_path]
+        slim_base = ["scanimage", "--format=png", "--mode", mode]
+        if dev:
+            slim_base.extend(["-d", dev])
+        if duplex:
+            slim_base.extend(["--source", "ADF Duplex"])
+        else:
+            slim_base.extend(["--source", "Flatbed"])
+        cmd = slim_base + ["-o", file_path]
         rc, err_text = await run(cmd)
     if rc != 0 and "initialize parameter is error" in err_text.lower():
-        safe_cmd = ["scanimage", "--format=png"]
+        safe_cmd = [
+            "scanimage",
+            "--format=png",
+            "--resolution",
+            str(resolution_dpi),
+            "--mode",
+            mode,
+        ]
         if dev:
             safe_cmd.extend(["-d", dev])
         safe_cmd.extend(["--source", "Flatbed", "-o", file_path])
