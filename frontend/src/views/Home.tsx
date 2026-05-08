@@ -1,7 +1,16 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Archive, Copy, Droplets, Info, Lock, ScanLine, Usb, Wifi } from "lucide-react";
 import { apiUrl } from "../api";
+import {
+  IconArchive,
+  IconCopy,
+  IconDroplets,
+  IconInfo,
+  IconLock,
+  IconScanLine,
+  IconUsb,
+  IconWifi,
+} from "../components/IndustrialIcons";
 import { KioskButton } from "../components/KioskButton";
 
 type HardwareInfo = {
@@ -114,7 +123,7 @@ export function Home() {
           <KioskButton
             layout="tile"
             variant="industrial"
-            icon={<Copy className="text-emerald-400" strokeWidth={2} />}
+            icon={<IconCopy className="text-emerald-400" />}
             className="min-h-0 min-w-0"
             onClick={() => nav("/copy")}
           >
@@ -124,29 +133,29 @@ export function Home() {
           <KioskButton
             layout="tile"
             variant="industrial"
-            icon={<ScanLine className="text-cyan-400" strokeWidth={2} />}
+            icon={<IconScanLine className="text-cyan-400" />}
             className="min-h-0 min-w-0"
             onClick={() => nav("/scan")}
           >
             Scan
           </KioskButton>
 
-          <KioskButton layout="tile" variant="industrialMuted" icon={<Usb className="text-zinc-500" strokeWidth={2} />} disabled badge="Soon">
+          <KioskButton layout="tile" variant="industrialMuted" icon={<IconUsb className="text-zinc-500" />} disabled badge="Soon">
             USB Print
           </KioskButton>
 
-          <KioskButton layout="tile" variant="industrialMuted" icon={<Archive className="text-zinc-500" strokeWidth={2} />} disabled badge="Soon">
+          <KioskButton layout="tile" variant="industrialMuted" icon={<IconArchive className="text-zinc-500" />} disabled badge="Soon">
             File Archive
           </KioskButton>
 
-          <KioskButton layout="tile" variant="industrialMuted" icon={<Info className="text-zinc-500" strokeWidth={2} />} disabled badge="Soon">
+          <KioskButton layout="tile" variant="industrialMuted" icon={<IconInfo className="text-zinc-500" />} disabled badge="Soon">
             System Info
           </KioskButton>
 
           <KioskButton
             layout="tile"
             variant="industrial"
-            icon={<Lock className="text-amber-400" strokeWidth={2} />}
+            icon={<IconLock className="text-amber-400" />}
             className="min-h-0 min-w-0 ring-1 ring-amber-500/30"
             badge="PIN"
             onClick={() => nav("/admin")}
@@ -160,14 +169,14 @@ export function Home() {
       {/* Bottom bar — pinned */}
       <footer className="flex shrink-0 items-stretch justify-between gap-2 border-t border-kiosk-industrial-border bg-kiosk-industrial-navy px-3 py-2.5 md:px-6 md:py-3">
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-kiosk-industrial-border/80 bg-kiosk-industrial-slate/50 px-3 py-2">
-          <Droplets className="h-5 w-5 shrink-0 text-zinc-500" strokeWidth={2} />
+          <IconDroplets className="h-5 w-5 shrink-0 text-zinc-500" />
           <div className="min-w-0">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Ink / Supplies</p>
             <p className="truncate text-sm font-bold text-zinc-300">OK</p>
           </div>
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-kiosk-industrial-border/80 bg-kiosk-industrial-slate/50 px-3 py-2">
-          <Usb className="h-5 w-5 shrink-0 text-zinc-500" strokeWidth={2} />
+          <IconUsb className="h-5 w-5 shrink-0 text-zinc-500" />
           <div className="min-w-0">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">USB</p>
             <p className="truncate text-sm font-bold text-zinc-300">
@@ -176,7 +185,7 @@ export function Home() {
           </div>
         </div>
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-kiosk-industrial-border/80 bg-kiosk-industrial-slate/50 px-3 py-2">
-          <Wifi className="h-5 w-5 shrink-0 text-zinc-500" strokeWidth={2} />
+          <IconWifi className="h-5 w-5 shrink-0 text-zinc-500" />
           <div className="min-w-0">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">Network</p>
             <p className="truncate text-sm font-bold text-zinc-300">LAN</p>
