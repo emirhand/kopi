@@ -91,11 +91,20 @@ def list_scan_devices(timeout_sec: int = 8) -> list[str]:
     devices: list[str] = []
     for line in text.splitlines():
         line = line.strip()
-        m = re.match(r"^device\s+`([^`]+)`\s+is\b", line)
-        if not m:
+        if not line.lower().startswith("device "):
             continue
-        devices.append(m.group(1))
-    return devices
+        m_backtick = re.match(r"^device\s+`([^`]+)`\s+is\b", line)
+        if m_backtick:
+            devices.append(m_backtick.group(1))
+            continue
+        m_quote = re.match(r"^device\s+'([^']+)'\s+is\b", line)
+        if m_quote:
+            devices.append(m_quote.group(1))
+            continue
+        m_fallback = re.match(r"^device\s+(.+?)\s+is\b", line)
+        if m_fallback:
+            devices.append(m_fallback.group(1).strip("`'\""))
+    return sorted(dict.fromkeys(devices))
 
 
 async def scan_pdf(

@@ -135,6 +135,18 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/hardware")
+def api_hardware():
+    settings = load_settings()
+    roots = settings.get("usb_roots", [])
+    usb_roots = [str(x).strip() for x in roots if str(x).strip()] if isinstance(roots, list) else None
+    return {
+        "scanners": scanner.list_scan_devices(),
+        "printers": printer.list_printer_queues(),
+        "usb_volumes": usb_manager.list_usb_mounts(roots=usb_roots, writable_only=False),
+    }
+
+
 @app.post("/api/scan")
 async def api_scan(body: ScanBody):
     settings = load_settings()

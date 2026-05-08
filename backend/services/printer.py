@@ -68,23 +68,27 @@ async def print_pdf(
 
 
 def list_printer_queues(timeout_sec: int = 8) -> list[str]:
-    """Return available CUPS destination names from `lpstat -a` output."""
-    try:
-        proc = subprocess.run(
-            ["lpstat", "-a"],
-            capture_output=True,
-            text=True,
-            timeout=timeout_sec,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return []
+    """Return available CUPS destination names using several command fallbacks."""
+
+    def _run(cmd: list[str]) -> str:
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout_sec,
+            )
+            return (proc.stdout or "").strip()
+        except (OSError, subprocess.SubprocessError):
+            return ""
 
     destinations: list[str] = []
-    for line in (proc.stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        dest = line.split()[0]
-        if dest:
-            destinations.append(dest)
-    return destinations
+    for output in (_run(["lpstat", "-a"]), _run(["lpstat", "-e"])):
+        for line in output.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            dest = line.split()[0]
+            if dest:
+                destinations.append(dest)
+    return sorted(dict.fromkeys(destinations))
