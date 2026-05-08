@@ -115,6 +115,19 @@ def _scan_error_message(
     return msg
 
 
+def _normalize_pdf_bytes(raw: bytes) -> bytes:
+    """Trim scanner stdout to the first complete PDF envelope."""
+    if not raw:
+        return b""
+    start = raw.find(b"%PDF-")
+    if start < 0:
+        return raw
+    end = raw.rfind(b"%%EOF")
+    if end < 0 or end < start:
+        return raw
+    return raw[start : end + len(b"%%EOF")]
+
+
 def _build_mock_pdf(text: str) -> bytes:
     """Hand-rolled minimal one-page PDF stamped with ``text``. No external deps."""
     safe = "".join(c if 32 <= ord(c) < 127 else "?" for c in text)[:80]
@@ -229,6 +242,7 @@ class RealScannerBridge(ScannerBridge):
             )
             log.error("scan_fail mode=real rc=%s msg=%r", rc, msg)
             return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
+        stdout = _normalize_pdf_bytes(stdout)
         if not stdout:
             no_data_cmd = build_scanimage_pdf_cmd(
                 duplex_scan=False,
@@ -252,6 +266,12 @@ class RealScannerBridge(ScannerBridge):
                 )
             log.error("scan_fail mode=real reason=empty msg=%r", msg)
             return ScanResult(ok=False, stdout=b"", stderr=(retry_err or err_text), user_message=msg)
+        if not stdout.startswith(b"%PDF-") or b"%%EOF" not in stdout:
+            msg = "Scanner returned non-PDF data; check scanner backend format support."
+            if _verbose_hardware_errors():
+                msg += f" [device={device or 'default'} cmd={' '.join(cmd)}]"
+            log.error("scan_fail mode=real reason=non_pdf msg=%r", msg)
+            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
 
         log.info("scan_ok mode=real bytes=%d", len(stdout))
         return ScanResult(ok=True, stdout=stdout, stderr=err_text, user_message=None)
