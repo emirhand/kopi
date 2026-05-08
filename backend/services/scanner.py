@@ -50,10 +50,13 @@ def build_scanimage_pdf_cmd(
     duplex_scan: bool = False,
     device: str | None = None,
     include_resolution: bool = True,
+    include_mode: bool = True,
 ) -> list[str]:
     """Arguments for `scanimage` emitting PDF on stdout (ends with `-o -`)."""
     env = os.environ.copy()
-    cmd: list[str] = ["scanimage", "--format=pdf", "--mode=Color"]
+    cmd: list[str] = ["scanimage", "--format=pdf"]
+    if include_mode:
+        cmd.extend(["--mode", env.get("SCAN_MODE", "Color")])
     if include_resolution:
         cmd.extend(["--resolution", env.get("SCAN_RESOLUTION", "300")])
 
