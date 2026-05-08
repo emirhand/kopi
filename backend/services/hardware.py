@@ -22,7 +22,15 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from .printer import PrintResult, classify_print_error
-from .scanner import ScanResult, ScanFileResult, build_scanimage_document_cmd, classify_scan_error
+from .scanner import (
+    SCANNER_BUSY_RECOVERY_HINT,
+    ScanResult,
+    ScanFileResult,
+    build_scanimage_document_cmd,
+    busy_retry_settings,
+    classify_scan_error,
+    is_scanner_busy_error,
+)
 
 log = logging.getLogger("kopi.hardware")
 
@@ -130,7 +138,11 @@ def _scan_error_message(
     device: str | None,
     cmd: list[str],
 ) -> str:
-    msg = classify_scan_error(err_text) or f"Scanner error: {err_text.strip() or returncode}"
+    classified = classify_scan_error(err_text)
+    if classified == "Scanner Busy":
+        msg = "Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT
+    else:
+        msg = classified or f"Scanner error: {err_text.strip() or returncode}"
     if "initialize parameter is error" in err_text.lower():
         msg += " Hint: selected scanner entry may be incompatible; try another Canon scanner device in Admin Settings."
     if _verbose_hardware_errors():
@@ -227,7 +239,7 @@ class RealScannerBridge(ScannerBridge):
             " ".join(cmd),
         )
 
-        async def run_once(run_cmd: list[str]) -> tuple[int, bytes, str]:
+        async def run_once_raw(run_cmd: list[str]) -> tuple[int, bytes, str]:
             try:
                 proc = await asyncio.create_subprocess_exec(
                     *run_cmd,
@@ -247,11 +259,39 @@ class RealScannerBridge(ScannerBridge):
                 return 124, b"", "timeout"
             return proc.returncode, stdout or b"", (stderr or b"").decode(errors="replace")
 
+        max_r, delay_s = busy_retry_settings()
+
+        async def run_once(run_cmd: list[str]) -> tuple[int, bytes, str]:
+            """Re-run on transient SANE ‘device busy’ (common after mis-feeds)."""
+            last: tuple[int, bytes, str] = (1, b"", "")
+            for attempt in range(max_r + 1):
+                rc, out, err = await run_once_raw(run_cmd)
+                last = (rc, out, err)
+                if rc == 0 or rc == 127 or rc == 124:
+                    return rc, out, err
+                if not is_scanner_busy_error(err):
+                    return rc, out, err
+                if attempt < max_r:
+                    log.warning(
+                        "scan_retry_device_busy mode=real attempt=%s/%s delay=%ss stderr=%s",
+                        attempt + 1,
+                        max_r,
+                        delay_s,
+                        _compact_stderr(err),
+                    )
+                    await asyncio.sleep(delay_s)
+            return last
+
         rc, stdout, err_text = await run_once(cmd)
         if rc == 127:
             return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Scanner Not Found")
         if rc == 124:
-            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Scanner Busy")
+            return ScanResult(
+                ok=False,
+                stdout=b"",
+                stderr=err_text,
+                user_message="Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT,
+            )
 
         if rc != 0 and "--resolution" in err_text and "unrecognized option" in err_text:
             fallback_cmd = build_scanimage_document_cmd(
@@ -284,7 +324,12 @@ class RealScannerBridge(ScannerBridge):
         if rc == 127:
             return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Scanner Not Found")
         if rc == 124:
-            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Scanner Busy")
+            return ScanResult(
+                ok=False,
+                stdout=b"",
+                stderr=err_text,
+                user_message="Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT,
+            )
         if rc != 0:
             msg = _scan_error_message(
                 err_text=err_text,

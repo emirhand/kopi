@@ -23,6 +23,7 @@ _NO_PAPER_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
 )
 _BUSY_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"device\s+busy", re.I),
+    re.compile(r"sane_start:.*busy", re.I),
     re.compile(r"scanner\s+busy", re.I),
     re.compile(r"resource\s+busy", re.I),
     re.compile(r"could\s+not\s+open\s+device", re.I),
@@ -56,6 +57,24 @@ def classify_scan_error(stderr: str) -> str | None:
         if pat.search(text):
             return "Scanner Busy"
     return None
+
+
+# Shown when SANE / AirScan reports "device busy" (common after a mis-feed until the MFP recovers)
+SCANNER_BUSY_RECOVERY_HINT = (
+    " After a paper error, the device or driver may need several seconds to release. "
+    "Clear the ADF, check the printer panel for a stuck job, then retry. "
+    "If it keeps failing, power-cycle the MFP or restart the Kopi service."
+)
+
+
+def is_scanner_busy_error(stderr: str) -> bool:
+    return classify_scan_error(stderr) == "Scanner Busy"
+
+
+def busy_retry_settings() -> tuple[int, float]:
+    retries = int(os.environ.get("KOPI_SCAN_BUSY_RETRIES", "4"))
+    delay = float(os.environ.get("KOPI_SCAN_BUSY_DELAY_SEC", "3"))
+    return max(0, retries), max(0.5, delay)
 
 
 def build_scanimage_pdf_cmd(
@@ -234,7 +253,7 @@ async def scan_copy_image_file(
         base_cmd.extend(["--source", "Flatbed"])
     cmd = base_cmd + ["-o", file_path]
 
-    async def run(run_cmd: list[str]) -> tuple[int, str]:
+    async def exec_once(run_cmd: list[str]) -> tuple[int, str]:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *run_cmd,
@@ -249,7 +268,29 @@ async def scan_copy_image_file(
             return 124, "timeout"
         return proc.returncode, (stderr or b"").decode(errors="replace")
 
-    rc, err_text = await run(cmd)
+    max_r, delay_s = busy_retry_settings()
+
+    async def exec_with_retries(run_cmd: list[str]) -> tuple[int, str]:
+        last_rc, last_err = -1, ""
+        for attempt in range(max_r + 1):
+            rc, err_text = await exec_once(run_cmd)
+            last_rc, last_err = rc, err_text
+            if rc == 0 or rc == 127 or rc == 124:
+                return rc, err_text
+            if not is_scanner_busy_error(err_text):
+                return rc, err_text
+            if attempt < max_r:
+                log.warning(
+                    "scan_copy_retry_device_busy attempt=%s/%s delay=%ss stderr=%s",
+                    attempt + 1,
+                    max_r,
+                    delay_s,
+                    err_text.strip()[:120],
+                )
+                await asyncio.sleep(delay_s)
+        return last_rc, last_err
+
+    rc, err_text = await exec_with_retries(cmd)
     if rc != 0 and "--resolution" in err_text and "unrecognized option" in err_text:
         slim_base = ["scanimage", "--format=png", "--mode", mode]
         if dev:
@@ -259,7 +300,7 @@ async def scan_copy_image_file(
         else:
             slim_base.extend(["--source", "Flatbed"])
         cmd = slim_base + ["-o", file_path]
-        rc, err_text = await run(cmd)
+        rc, err_text = await exec_with_retries(cmd)
     if rc != 0 and "initialize parameter is error" in err_text.lower():
         safe_cmd = [
             "scanimage",
@@ -273,22 +314,26 @@ async def scan_copy_image_file(
             safe_cmd.extend(["-d", dev])
         safe_cmd.extend(["--source", "Flatbed", "-o", file_path])
         cmd = safe_cmd
-        rc, err_text = await run(cmd)
+        rc, err_text = await exec_with_retries(cmd)
 
     if rc == 127:
         output.unlink(missing_ok=True)
         return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Scanner Not Found")
     if rc == 124:
         output.unlink(missing_ok=True)
-        return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Scanner Busy")
-    if rc != 0:
-        output.unlink(missing_ok=True)
         return ScanFileResult(
             ok=False,
             path="",
             stderr=err_text,
-            user_message=classify_scan_error(err_text) or f"Scanner error: {err_text.strip() or rc}",
+            user_message="Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT,
         )
+    if rc != 0:
+        output.unlink(missing_ok=True)
+        classified = classify_scan_error(err_text)
+        um = classified or f"Scanner error: {err_text.strip() or rc}"
+        if classified == "Scanner Busy":
+            um = "Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT
+        return ScanFileResult(ok=False, path="", stderr=err_text, user_message=um)
     try:
         if output.stat().st_size <= 0:
             output.unlink(missing_ok=True)
