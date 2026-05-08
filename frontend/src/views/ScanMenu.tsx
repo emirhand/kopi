@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiUrl, parseErrorDetail } from "../api";
+import { KOPI_USB_MOUNT_STORAGE_KEY } from "../usbStorage";
 import { KioskButton } from "../components/KioskButton";
 import { StatusModal } from "../components/StatusModal";
 
@@ -44,7 +45,18 @@ export function ScanMenu() {
   async function scanUsb() {
     setBusy("usb");
     try {
-      const res = await fetch(apiUrl("/api/scan/usb"), { method: "POST" });
+      let mountPath: string | null = null;
+      try {
+        const raw = sessionStorage.getItem(KOPI_USB_MOUNT_STORAGE_KEY);
+        mountPath = raw && raw.trim() ? raw.trim() : null;
+      } catch {
+        mountPath = null;
+      }
+      const res = await fetch(apiUrl("/api/scan/usb"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ mount_path: mountPath }),
+      });
       if (!res.ok) {
         const msg = await parseErrorDetail(res);
         setModal({ title: "Scan to USB", message: msg, variant: "error" });

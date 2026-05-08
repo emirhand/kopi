@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import FastAPI, Header, HTTPException
+from fastapi import Body, FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -134,6 +134,14 @@ class AdminSettingsUpdate(BaseModel):
     usb_roots: list[str] = Field(default_factory=list)
 
 
+class UsbMountBody(BaseModel):
+    device: str = Field(..., min_length=4, description="Block device e.g. /dev/sdb1")
+
+
+class ScanUsbBody(BaseModel):
+    mount_path: Optional[str] = None
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok"}
@@ -141,14 +149,28 @@ def health():
 
 @app.get("/api/hardware")
 def api_hardware():
-    settings = load_settings()
-    roots = settings.get("usb_roots", [])
-    usb_roots = [str(x).strip() for x in roots if str(x).strip()] if isinstance(roots, list) else None
     return {
         "scanners": scanner.list_scan_devices(),
         "printers": printer.list_printer_queues(),
-        "usb_volumes": usb_manager.list_usb_mounts(roots=usb_roots, writable_only=False),
+        "usb_volumes": [v.to_dict() for v in usb_manager.list_usb_volumes()],
     }
+
+
+@app.post("/api/usb/mount")
+def api_usb_mount(body: UsbMountBody):
+    vols = usb_manager.list_usb_volumes()
+    vol = next((v for v in vols if v.device == body.device.strip()), None)
+    if vol is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Device not found. Plug in the USB drive, then open USB storage again.",
+        )
+    if vol.mounted and vol.mountpoint:
+        return {"ok": True, "mountpoint": vol.mountpoint, "message": f"Already mounted at {vol.mountpoint}"}
+    mp, err = usb_manager.mount_usb_partition(vol.device)
+    if err or not mp:
+        raise HTTPException(status_code=400, detail=err or "Mount failed")
+    return {"ok": True, "mountpoint": mp, "message": f"Mounted at {mp}"}
 
 
 @app.post("/api/scan")
@@ -222,15 +244,15 @@ async def api_scan_email(body: ScanEmailBody):
 
 
 @app.post("/api/scan/usb")
-async def api_scan_usb():
+async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)):
     settings = load_settings()
+    vols = usb_manager.list_usb_volumes()
     try:
-        roots = settings.get("usb_roots", [])
-        mount = usb_manager.require_usb_path(
-            roots=[str(x).strip() for x in roots if str(x).strip()] if isinstance(roots, list) else None
-        )
-    except FileNotFoundError:
-        raise HTTPException(status_code=400, detail="USB Not Found")
+        mount = usb_manager.resolve_writable_usb_mount(body.mount_path, volumes=vols)
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=400, detail=str(e) or "USB Not Found") from e
+    except PermissionError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
 
     scan = await scanner.scan_pdf(
         duplex=False,

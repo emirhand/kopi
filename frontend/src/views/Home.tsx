@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiUrl } from "../api";
 import {
@@ -12,12 +12,11 @@ import {
   IconWifi,
 } from "../components/IndustrialIcons";
 import { KioskButton } from "../components/KioskButton";
+import { UsbStorageModal } from "../components/UsbStorageModal";
+import type { HardwareInfo } from "../types/hardware";
+import { KOPI_USB_MOUNT_STORAGE_KEY } from "../usbStorage";
 
-type HardwareInfo = {
-  scanners: string[];
-  printers: string[];
-  usb_volumes: string[];
-};
+export type { UsbVolumeInfo } from "../types/hardware";
 
 function formatClock(d: Date) {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
@@ -27,11 +26,67 @@ function formatDate(d: Date) {
   return d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric", year: "numeric" });
 }
 
+function normalizeHardware(data: unknown): HardwareInfo {
+  const d = data as Record<string, unknown>;
+  const rawUsb = d?.usb_volumes;
+  let usb_volumes: HardwareInfo["usb_volumes"] = [];
+  if (Array.isArray(rawUsb)) {
+    usb_volumes = rawUsb.map((x) => {
+      if (typeof x === "string") {
+        return {
+          device: "",
+          mountpoint: x,
+          label: x.split("/").filter(Boolean).pop() || x,
+          model: "",
+          mounted: true,
+        };
+      }
+      const o = x as Record<string, unknown>;
+      return {
+        device: String(o.device ?? ""),
+        mountpoint: o.mountpoint != null ? String(o.mountpoint) : null,
+        label: String(o.label ?? ""),
+        model: String(o.model ?? ""),
+        mounted: Boolean(o.mounted),
+      };
+    });
+  }
+  return {
+    scanners: Array.isArray(d?.scanners) ? (d.scanners as string[]) : [],
+    printers: Array.isArray(d?.printers) ? (d.printers as string[]) : [],
+    usb_volumes,
+  };
+}
+
+function readSelectedUsb(): string | null {
+  try {
+    const v = sessionStorage.getItem(KOPI_USB_MOUNT_STORAGE_KEY);
+    return v && v.trim() ? v.trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 export function Home() {
   const nav = useNavigate();
   const [now, setNow] = useState(() => new Date());
   const [hardware, setHardware] = useState<HardwareInfo>({ scanners: [], printers: [], usb_volumes: [] });
   const [systemStatus, setSystemStatus] = useState<"ok" | "offline" | "checking">("checking");
+  const [usbModalOpen, setUsbModalOpen] = useState(false);
+  const [selectedUsbMount, setSelectedUsbMount] = useState<string | null>(() => readSelectedUsb());
+  const [hardwareHydrated, setHardwareHydrated] = useState(false);
+
+  const refreshHardware = useCallback(async () => {
+    try {
+      const res = await fetch(apiUrl("/api/hardware"));
+      if (!res.ok) return;
+      const data = await res.json();
+      setHardware(normalizeHardware(data));
+      setHardwareHydrated(true);
+    } catch {
+      /* ignore */
+    }
+  }, []);
 
   useEffect(() => {
     const t = window.setInterval(() => setNow(new Date()), 1000);
@@ -39,26 +94,37 @@ export function Home() {
   }, []);
 
   useEffect(() => {
-    let active = true;
-    (async () => {
+    void refreshHardware();
+  }, [refreshHardware]);
+
+  useEffect(() => {
+    const id = window.setInterval(refreshHardware, 8000);
+    return () => window.clearInterval(id);
+  }, [refreshHardware]);
+
+  useEffect(() => {
+    if (!hardwareHydrated) return;
+    const sel = readSelectedUsb();
+    if (!sel) return;
+    const mounted = hardware.usb_volumes.filter((v) => v.mounted && v.mountpoint);
+    if (mounted.length === 0) {
       try {
-        const res = await fetch(apiUrl("/api/hardware"));
-        if (!res.ok) return;
-        const data = await res.json();
-        if (!active) return;
-        setHardware({
-          scanners: Array.isArray(data?.scanners) ? data.scanners : [],
-          printers: Array.isArray(data?.printers) ? data.printers : [],
-          usb_volumes: Array.isArray(data?.usb_volumes) ? data.usb_volumes : [],
-        });
+        sessionStorage.removeItem(KOPI_USB_MOUNT_STORAGE_KEY);
       } catch {
         /* ignore */
       }
-    })();
-    return () => {
-      active = false;
-    };
-  }, []);
+      setSelectedUsbMount(null);
+      return;
+    }
+    if (!mounted.some((v) => v.mountpoint === sel)) {
+      try {
+        sessionStorage.removeItem(KOPI_USB_MOUNT_STORAGE_KEY);
+      } catch {
+        /* ignore */
+      }
+      setSelectedUsbMount(null);
+    }
+  }, [hardware.usb_volumes, hardwareHydrated]);
 
   useEffect(() => {
     let active = true;
@@ -71,7 +137,7 @@ export function Home() {
         if (active) setSystemStatus("offline");
       }
     })();
-    const id = window.setInterval(async () => {
+    const hid = window.setInterval(async () => {
       try {
         const res = await fetch(apiUrl("/api/health"));
         if (!active) return;
@@ -82,9 +148,32 @@ export function Home() {
     }, 15000);
     return () => {
       active = false;
-      window.clearInterval(id);
+      window.clearInterval(hid);
     };
   }, []);
+
+  const mountedUsb = hardware.usb_volumes.filter((v) => v.mounted && v.mountpoint);
+  const usbFooterLabel = (() => {
+    if (selectedUsbMount) {
+      const match = hardware.usb_volumes.find((v) => v.mountpoint === selectedUsbMount);
+      const name = match?.label || selectedUsbMount.split("/").filter(Boolean).pop() || selectedUsbMount;
+      return name;
+    }
+    if (mountedUsb.length === 0) return "None";
+    if (mountedUsb.length === 1 && mountedUsb[0].mountpoint) {
+      return `${mountedUsb[0].label || "USB"} — tap to choose`;
+    }
+    return `${mountedUsb.length} drive(s) — tap to choose`;
+  })();
+
+  function selectUsbMount(mountPath: string) {
+    try {
+      sessionStorage.setItem(KOPI_USB_MOUNT_STORAGE_KEY, mountPath);
+    } catch {
+      /* ignore */
+    }
+    setSelectedUsbMount(mountPath);
+  }
 
   const statusLabel =
     systemStatus === "ok" ? "Ready" : systemStatus === "offline" ? "Service offline" : "Checking…";
@@ -93,6 +182,17 @@ export function Home() {
 
   return (
     <div className="flex h-[100dvh] w-[100dvw] flex-col overflow-hidden bg-kiosk-industrial-bezel font-kiosk text-zinc-100">
+      <UsbStorageModal
+        open={usbModalOpen}
+        onClose={() => setUsbModalOpen(false)}
+        volumes={hardware.usb_volumes}
+        selectedMountPath={selectedUsbMount}
+        onSelectMount={(mp) => {
+          selectUsbMount(mp);
+        }}
+        onRefresh={refreshHardware}
+      />
+
       {/* Top bar — pinned */}
       <header className="flex shrink-0 items-center justify-between border-b border-kiosk-industrial-border bg-kiosk-industrial-navy px-4 py-3 md:px-6 md:py-3.5">
         <div className="min-w-0">
@@ -175,15 +275,17 @@ export function Home() {
             <p className="truncate text-sm font-bold text-zinc-300">OK</p>
           </div>
         </div>
-        <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-kiosk-industrial-border/80 bg-kiosk-industrial-slate/50 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setUsbModalOpen(true)}
+          className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-kiosk-industrial-border/80 bg-kiosk-industrial-slate/50 px-3 py-2 text-left transition-colors active:bg-kiosk-industrial-slate active:scale-[0.98]"
+        >
           <IconUsb className="h-5 w-5 shrink-0 text-zinc-500" />
           <div className="min-w-0">
             <p className="text-[10px] font-semibold uppercase tracking-wider text-zinc-500">USB</p>
-            <p className="truncate text-sm font-bold text-zinc-300">
-              {hardware.usb_volumes.length ? `${hardware.usb_volumes.length} volume(s)` : "None"}
-            </p>
+            <p className="truncate text-sm font-bold text-zinc-300">{usbFooterLabel}</p>
           </div>
-        </div>
+        </button>
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-kiosk-industrial-border/80 bg-kiosk-industrial-slate/50 px-3 py-2">
           <IconWifi className="h-5 w-5 shrink-0 text-zinc-500" />
           <div className="min-w-0">
