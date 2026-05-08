@@ -22,6 +22,12 @@ export default {
           danger: "#ef4444",
           text: "#f4f4f5",
           muted: "#a1a1aa",
+          industrial: {
+            navy: "#0f172a",
+            slate: "#1e293b",
+            border: "#334155",
+            bezel: "#0c1222",
+          },
         },
       },
       fontFamily: {
