@@ -1,10 +1,10 @@
-"""SANE / scanimage subprocess wrapper."""
+"""SANE / scanimage façade — delegates to :mod:`services.hardware`."""
 
 from __future__ import annotations
 
+import logging
 import os
 import re
-import subprocess
 from dataclasses import dataclass
 from typing import Final
 
@@ -21,6 +21,8 @@ _BUSY_PATTERNS: Final[tuple[re.Pattern[str], ...]] = (
     re.compile(r"resource\s+busy", re.I),
     re.compile(r"could\s+not\s+open\s+device", re.I),
 )
+
+log = logging.getLogger("kopi.scanner")
 
 
 @dataclass(frozen=True)
@@ -62,25 +64,23 @@ def build_scanimage_pdf_cmd(*, duplex_scan: bool = False, device: str | None = N
     return cmd
 
 
-def scan_pdf_to_stdout(
+async def scan_pdf(
     *,
-    duplex_scan: bool = False,
+    duplex: bool = False,
     device: str | None = None,
     timeout_sec: int = 300,
 ) -> ScanResult:
-    """
-    Run scanimage and capture PDF bytes on stdout.
-    Duplex ADF flags are best-effort; backends differ (override with SCANIMAGE_EXTRA_ARGS).
-    """
-    env = os.environ.copy()
-    cmd = build_scanimage_pdf_cmd(duplex_scan=duplex_scan, device=device)
+    """Run ``scanimage`` (or Mock) and capture PDF bytes on stdout."""
+    from .hardware import get_scanner
 
-    proc = subprocess.run(cmd, capture_output=True, timeout=timeout_sec, env=env)
-    stderr = (proc.stderr or b"").decode(errors="replace")
-    if proc.returncode != 0:
-        msg = classify_scan_error(stderr) or f"Scanner error: {stderr.strip() or proc.returncode}"
-        return ScanResult(ok=False, stdout=b"", stderr=stderr, user_message=msg)
-    if not proc.stdout:
-        msg = classify_scan_error(stderr) or "Scanner returned no data"
-        return ScanResult(ok=False, stdout=b"", stderr=stderr, user_message=msg)
-    return ScanResult(ok=True, stdout=proc.stdout, stderr=stderr, user_message=None)
+    result = await get_scanner().scan_pdf(
+        duplex=duplex, device=device, timeout_sec=timeout_sec
+    )
+    log.info(
+        "scan_facade duplex=%s ok=%s bytes=%d user_message=%r",
+        duplex,
+        result.ok,
+        len(result.stdout) if result.ok else 0,
+        result.user_message,
+    )
+    return result

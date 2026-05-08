@@ -5,7 +5,7 @@ import { Keypad } from "../components/Keypad";
 import { KioskButton } from "../components/KioskButton";
 import { StatusModal } from "../components/StatusModal";
 
-const SESSION_KEY = "lpss_admin_password";
+const SESSION_KEY = "kopi_admin_password";
 
 export function AdminLogin() {
   const nav = useNavigate();

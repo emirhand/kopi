@@ -4,8 +4,11 @@ Linux Smart Copier Appliance — FastAPI bridge to SANE, CUPS, USB, and msmtp.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import os
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,10 +18,54 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from logging_config import setup_logging
 from services import mailer, printer, scanner, usb_manager
+
+setup_logging()
+log = logging.getLogger("kopi.api")
 
 APP_ROOT = Path(__file__).resolve().parent
 SETTINGS_PATH = Path(os.environ.get("SETTINGS_PATH", APP_ROOT / "config" / "settings.json"))
+
+SCAN_TTL_SEC = int(os.environ.get("KOPI_SCAN_TTL_SEC", "300"))
+
+
+class _ScanStore:
+    """In-memory scan PDF cache with lazy TTL expiry."""
+
+    def __init__(self, ttl_sec: int) -> None:
+        self._ttl_sec = ttl_sec
+        self._lock = asyncio.Lock()
+        self._data: dict[str, tuple[float, bytes]] = {}
+
+    def _purge_unlocked(self) -> None:
+        now = time.monotonic()
+        dead = [k for k, (exp, _) in self._data.items() if exp <= now]
+        for k in dead:
+            del self._data[k]
+
+    async def put(self, pdf: bytes) -> str:
+        scan_id = uuid.uuid4().hex
+        exp = time.monotonic() + self._ttl_sec
+        async with self._lock:
+            self._purge_unlocked()
+            self._data[scan_id] = (exp, pdf)
+        log.info("scan_cached scan_id=%s bytes=%d ttl_sec=%d", scan_id, len(pdf), self._ttl_sec)
+        return scan_id
+
+    async def pop(self, scan_id: str) -> bytes:
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.pop(scan_id, None)
+            if item is None:
+                raise KeyError(scan_id)
+            exp, pdf = item
+            if exp <= time.monotonic():
+                raise KeyError(scan_id)
+            return pdf
+
+
+SCAN_STORE = _ScanStore(SCAN_TTL_SEC)
 
 
 def load_settings() -> dict:
@@ -50,7 +97,12 @@ app.add_middleware(
 )
 
 
-class CopyBody(BaseModel):
+class ScanBody(BaseModel):
+    duplex: bool = False
+
+
+class PrintBody(BaseModel):
+    scan_id: str = Field(..., min_length=8)
     duplex: bool = False
 
 
@@ -80,22 +132,36 @@ def health():
     return {"status": "ok"}
 
 
-@app.post("/api/copy")
-def api_copy(body: CopyBody):
-    """
-    Pipe scan directly to print: scanimage --format=pdf ... | lp
-    """
-    cmd = scanner.build_scanimage_pdf_cmd(duplex_scan=body.duplex)
-    result = printer.print_from_scanimage_pipe(duplex=body.duplex, scan_cmd=cmd)
+@app.post("/api/scan")
+async def api_scan(body: ScanBody):
+    scan = await scanner.scan_pdf(duplex=body.duplex)
+    if not scan.ok:
+        raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
+    scan_id = await SCAN_STORE.put(scan.stdout)
+    return {"scan_id": scan_id, "bytes": len(scan.stdout)}
+
+
+@app.post("/api/print")
+async def api_print(body: PrintBody):
+    try:
+        pdf = await SCAN_STORE.pop(body.scan_id)
+    except KeyError:
+        raise HTTPException(
+            status_code=400,
+            detail="Scan expired or not found. Please scan again.",
+        ) from None
+
+    result = await printer.print_pdf(pdf, duplex=body.duplex, job_name="kopi-copy")
     if not result.ok:
-        raise HTTPException(status_code=400, detail=result.user_message or "Copy failed")
-    return {"ok": True, "message": "Copy job submitted"}
+        await SCAN_STORE.put(pdf)
+        raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
+    return {"ok": True, "message": "Print job submitted"}
 
 
 @app.post("/api/scan/email")
-def api_scan_email(body: ScanEmailBody):
+async def api_scan_email(body: ScanEmailBody):
     settings = load_settings()
-    scan = scanner.scan_pdf_to_stdout(duplex_scan=False)
+    scan = await scanner.scan_pdf(duplex=False)
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
 
@@ -111,13 +177,13 @@ def api_scan_email(body: ScanEmailBody):
 
 
 @app.post("/api/scan/usb")
-def api_scan_usb():
+async def api_scan_usb():
     try:
         mount = usb_manager.require_usb_path()
     except FileNotFoundError:
         raise HTTPException(status_code=400, detail="USB Not Found")
 
-    scan = scanner.scan_pdf_to_stdout(duplex_scan=False)
+    scan = await scanner.scan_pdf(duplex=False)
     if not scan.ok:
         raise HTTPException(status_code=400, detail=scan.user_message or "Scan failed")
 
