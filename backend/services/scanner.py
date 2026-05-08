@@ -51,6 +51,8 @@ def build_scanimage_pdf_cmd(
     device: str | None = None,
     include_resolution: bool = True,
     include_mode: bool = True,
+    source: str | None = None,
+    include_output_file_flag: bool = True,
 ) -> list[str]:
     """Arguments for `scanimage` emitting PDF on stdout (ends with `-o -`)."""
     env = os.environ.copy()
@@ -66,12 +68,15 @@ def build_scanimage_pdf_cmd(
 
     if duplex_scan:
         cmd.extend(["--source", "ADF", "--duplex"])
+    elif source:
+        cmd.extend(["--source", source])
 
     extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
     if extra:
         cmd.extend(extra.split())
 
-    cmd.extend(["-o", "-"])
+    if include_output_file_flag:
+        cmd.extend(["-o", "-"])
     return cmd
 
 

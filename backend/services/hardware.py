@@ -209,6 +209,8 @@ class RealScannerBridge(ScannerBridge):
                 device=device,
                 include_resolution=False,
                 include_mode=False,
+                source="Flatbed",
+                include_output_file_flag=False,
             )
             log.warning("scan_retry_safe_profile mode=real device=%r cmd=%s", device, " ".join(safe_cmd))
             rc, stdout, err_text = await run_once(safe_cmd)
@@ -228,11 +230,28 @@ class RealScannerBridge(ScannerBridge):
             log.error("scan_fail mode=real rc=%s msg=%r", rc, msg)
             return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
         if not stdout:
-            msg = classify_scan_error(err_text) or "Scanner returned no data"
+            no_data_cmd = build_scanimage_pdf_cmd(
+                duplex_scan=False,
+                device=device,
+                include_resolution=False,
+                include_mode=False,
+                source="Flatbed",
+                include_output_file_flag=False,
+            )
+            log.warning("scan_retry_no_data_flatbed mode=real device=%r cmd=%s", device, " ".join(no_data_cmd))
+            retry_rc, retry_stdout, retry_err = await run_once(no_data_cmd)
+            if retry_rc == 0 and retry_stdout:
+                log.info("scan_ok mode=real retry=no_data_flatbed bytes=%d", len(retry_stdout))
+                return ScanResult(ok=True, stdout=retry_stdout, stderr=retry_err, user_message=None)
+
+            msg = classify_scan_error(retry_err or err_text) or "Scanner returned no data"
             if _verbose_hardware_errors():
-                msg += f" [device={device or 'default'} cmd={' '.join(cmd)}]"
+                msg += (
+                    f" [device={device or 'default'} cmd={' '.join(cmd)} "
+                    f"fallback_cmd={' '.join(no_data_cmd)} stderr={_compact_stderr(retry_err or err_text)}]"
+                )
             log.error("scan_fail mode=real reason=empty msg=%r", msg)
-            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
+            return ScanResult(ok=False, stdout=b"", stderr=(retry_err or err_text), user_message=msg)
 
         log.info("scan_ok mode=real bytes=%d", len(stdout))
         return ScanResult(ok=True, stdout=stdout, stderr=err_text, user_message=None)
