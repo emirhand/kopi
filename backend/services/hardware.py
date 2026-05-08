@@ -295,7 +295,7 @@ class RealPrinterBridge(PrinterBridge):
             )
 
         try:
-            _stdout, stderr = await asyncio.wait_for(
+            stdout, stderr = await asyncio.wait_for(
                 proc.communicate(input=pdf_bytes), timeout=timeout_sec
             )
         except asyncio.TimeoutError:
@@ -306,6 +306,7 @@ class RealPrinterBridge(PrinterBridge):
                 ok=False, stderr="timeout", user_message="Printer Busy"
             )
 
+        out_text = (stdout or b"").decode(errors="replace")
         err_text = (stderr or b"").decode(errors="replace")
         if proc.returncode != 0:
             msg = (
@@ -313,10 +314,63 @@ class RealPrinterBridge(PrinterBridge):
                 or f"Print error: {err_text.strip() or proc.returncode}"
             )
             log.error("print_fail mode=real rc=%s msg=%r", proc.returncode, msg)
-            return PrintResult(ok=False, stderr=err_text, user_message=msg)
+            return PrintResult(
+                ok=False,
+                stderr=err_text,
+                user_message=msg,
+                stdout=out_text,
+                destination=dest or "",
+            )
+
+        job_match = re.search(r"request id is (\S+)", out_text)
+        job_id = job_match.group(1) if job_match else ""
+
+        async def job_visible_in_cups(check_job_id: str) -> bool | None:
+            try:
+                lpstat_proc = await asyncio.create_subprocess_exec(
+                    "lpstat",
+                    "-W",
+                    "all",
+                    "-o",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                return None
+            lpstat_out, _lpstat_err = await lpstat_proc.communicate()
+            if lpstat_proc.returncode != 0:
+                return None
+            text = (lpstat_out or b"").decode(errors="replace")
+            return check_job_id in text
+
+        if job_id:
+            visible = await job_visible_in_cups(job_id)
+            if visible is False:
+                msg = (
+                    f'Print command accepted but CUPS queue does not show job "{job_id}". '
+                    "Check selected printer queue and CUPS status."
+                )
+                if _verbose_hardware_errors():
+                    msg += f" [dest={dest or 'default'} lp_stdout={_compact_stderr(out_text)}]"
+                log.error("print_fail mode=real reason=job_not_visible job_id=%s", job_id)
+                return PrintResult(
+                    ok=False,
+                    stderr=err_text,
+                    user_message=msg,
+                    stdout=out_text,
+                    job_id=job_id,
+                    destination=dest or "",
+                )
 
         log.info("print_ok mode=real")
-        return PrintResult(ok=True, stderr=err_text, user_message=None)
+        return PrintResult(
+            ok=True,
+            stderr=err_text,
+            user_message=None,
+            stdout=out_text,
+            job_id=job_id,
+            destination=dest or "",
+        )
 
 
 class MockScannerBridge(ScannerBridge):

@@ -180,7 +180,12 @@ async def api_print(body: PrintBody):
     if not result.ok:
         await SCAN_STORE.put(pdf)
         raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
-    return {"ok": True, "message": "Print job submitted"}
+    message = "Print job submitted"
+    if result.job_id:
+        message += f" ({result.job_id})"
+    if result.destination:
+        message += f" to {result.destination}"
+    return {"ok": True, "message": message, "job_id": result.job_id, "destination": result.destination}
 
 
 @app.post("/api/scan/email")

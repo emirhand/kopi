@@ -27,6 +27,9 @@ class PrintResult:
     ok: bool
     stderr: str
     user_message: str | None
+    stdout: str = ""
+    job_id: str = ""
+    destination: str = ""
 
 
 def classify_print_error(stderr: str) -> str | None:
