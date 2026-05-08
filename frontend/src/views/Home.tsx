@@ -2,9 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiUrl } from "../api";
 import {
-  IconArchive,
   IconCopy,
   IconDroplets,
+  IconIdCard,
   IconInfo,
   IconLock,
   IconScanLine,
@@ -244,8 +244,14 @@ export function Home() {
             USB Print
           </KioskButton>
 
-          <KioskButton layout="tile" variant="industrialMuted" icon={<IconArchive className="text-zinc-500" />} disabled badge="Soon">
-            File Archive
+          <KioskButton
+            layout="tile"
+            variant="industrial"
+            icon={<IconIdCard className="text-violet-400" />}
+            className="min-h-0 min-w-0"
+            onClick={() => nav("/id-scan")}
+          >
+            ID Scan
           </KioskButton>
 
           <KioskButton layout="tile" variant="industrialMuted" icon={<IconInfo className="text-zinc-500" />} disabled badge="Soon">

@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from logging_config import setup_logging
-from services import mailer, printer, scanner, usb_manager
+from services import mailer, printer, processor, scanner, usb_manager
 
 setup_logging()
 log = logging.getLogger("kopi.api")
@@ -28,6 +28,7 @@ APP_ROOT = Path(__file__).resolve().parent
 SETTINGS_PATH = Path(os.environ.get("SETTINGS_PATH", APP_ROOT / "config" / "settings.json"))
 
 SCAN_TTL_SEC = int(os.environ.get("KOPI_SCAN_TTL_SEC", "300"))
+ID_SCAN_TTL_SEC = int(os.environ.get("KOPI_ID_SCAN_TTL_SEC", "600"))
 
 
 class _ScanStore:
@@ -70,6 +71,127 @@ class _ScanStore:
 
 
 SCAN_STORE = _ScanStore(SCAN_TTL_SEC)
+
+
+class _IdScanStore:
+    """Session state for two-sided ID scan → one PDF."""
+
+    def __init__(self, ttl_sec: int) -> None:
+        self._ttl_sec = ttl_sec
+        self._lock = asyncio.Lock()
+        self._data: dict[str, tuple[float, dict[str, str | None]]] = {}
+
+    def _cleanup_payload(self, payload: dict[str, str | None]) -> None:
+        for key in ("front", "back", "pdf"):
+            p = payload.get(key)
+            if p:
+                try:
+                    Path(str(p)).unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _purge_unlocked(self) -> None:
+        now = time.monotonic()
+        dead = [k for k, (exp, _) in self._data.items() if exp <= now]
+        for k in dead:
+            _exp, payload = self._data.pop(k)
+            self._cleanup_payload(payload)
+
+    async def create_session(self) -> str:
+        sid = uuid.uuid4().hex
+        async with self._lock:
+            self._purge_unlocked()
+            self._data[sid] = (
+                time.monotonic() + self._ttl_sec,
+                {"front": None, "back": None, "pdf": None},
+            )
+        return sid
+
+    async def set_front(self, sid: str, path: str) -> bool:
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.get(sid)
+            if not item:
+                return False
+            exp, pl = item
+            if exp <= time.monotonic():
+                self._data.pop(sid, None)
+                self._cleanup_payload(pl)
+                return False
+            old = pl.get("front")
+            if old:
+                try:
+                    Path(str(old)).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            pl["front"] = path
+            self._data[sid] = (time.monotonic() + self._ttl_sec, pl)
+        return True
+
+    async def set_back(self, sid: str, path: str) -> bool:
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.get(sid)
+            if not item:
+                return False
+            exp, pl = item
+            if exp <= time.monotonic():
+                self._data.pop(sid, None)
+                self._cleanup_payload(pl)
+                return False
+            old = pl.get("back")
+            if old:
+                try:
+                    Path(str(old)).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            pl["back"] = path
+            self._data[sid] = (time.monotonic() + self._ttl_sec, pl)
+        return True
+
+    async def set_pdf(self, sid: str, path: str) -> bool:
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.get(sid)
+            if not item:
+                return False
+            exp, pl = item
+            if exp <= time.monotonic():
+                self._data.pop(sid, None)
+                self._cleanup_payload(pl)
+                return False
+            old = pl.get("pdf")
+            if old:
+                try:
+                    Path(str(old)).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            pl["pdf"] = path
+            self._data[sid] = (time.monotonic() + self._ttl_sec, pl)
+        return True
+
+    async def get_payload(self, sid: str) -> dict[str, str | None] | None:
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.get(sid)
+            if not item:
+                return None
+            exp, pl = item
+            if exp <= time.monotonic():
+                self._data.pop(sid, None)
+                self._cleanup_payload(pl)
+                return None
+            self._data[sid] = (time.monotonic() + self._ttl_sec, pl)
+            return dict(pl)
+
+    async def discard(self, sid: str) -> None:
+        async with self._lock:
+            item = self._data.pop(sid, None)
+            if item:
+                self._cleanup_payload(item[1])
+
+
+ID_SCAN_STORE = _IdScanStore(ID_SCAN_TTL_SEC)
 
 
 def load_settings() -> dict:
@@ -132,6 +254,16 @@ class AdminSettingsUpdate(BaseModel):
     scanner_device: str = ""
     printer_device: str = ""
     usb_roots: list[str] = Field(default_factory=list)
+    id_scan_ocr: bool = False
+
+
+class IdScanSessionBody(BaseModel):
+    session_id: str = Field(..., min_length=8)
+
+
+class IdScanEmailBody(BaseModel):
+    session_id: str = Field(..., min_length=8)
+    recipient: str = Field(..., min_length=3)
 
 
 class UsbMountBody(BaseModel):
@@ -156,6 +288,12 @@ def api_hardware():
     }
 
 
+@app.get("/api/settings/public")
+def api_settings_public():
+    settings = load_settings()
+    return {"id_scan_ocr": bool(settings.get("id_scan_ocr", False))}
+
+
 @app.post("/api/usb/mount")
 def api_usb_mount(body: UsbMountBody):
     vols = usb_manager.list_usb_volumes()
@@ -171,6 +309,139 @@ def api_usb_mount(body: UsbMountBody):
     if err or not mp:
         raise HTTPException(status_code=400, detail=err or "Mount failed")
     return {"ok": True, "mountpoint": mp, "message": f"Mounted at {mp}"}
+
+
+@app.post("/api/id-scan/front")
+async def api_id_scan_front():
+    settings = load_settings()
+    dev = str(settings.get("scanner_device", "")).strip() or None
+    sid = await ID_SCAN_STORE.create_session()
+    res = await scanner.scan_id_side("front", device=dev)
+    if not res.ok:
+        await ID_SCAN_STORE.discard(sid)
+        raise HTTPException(status_code=400, detail=res.user_message or "Scan failed")
+    if not await ID_SCAN_STORE.set_front(sid, res.path):
+        Path(res.path).unlink(missing_ok=True)
+        await ID_SCAN_STORE.discard(sid)
+        raise HTTPException(status_code=500, detail="Session error")
+    return {"ok": True, "session_id": sid}
+
+
+@app.post("/api/id-scan/back")
+async def api_id_scan_back(body: IdScanSessionBody):
+    settings = load_settings()
+    dev = str(settings.get("scanner_device", "")).strip() or None
+    pl = await ID_SCAN_STORE.get_payload(body.session_id)
+    if not pl or not pl.get("front"):
+        raise HTTPException(status_code=400, detail="Invalid or expired session. Scan the front again.")
+    res = await scanner.scan_id_side("back", device=dev)
+    if not res.ok:
+        raise HTTPException(status_code=400, detail=res.user_message or "Scan failed")
+    if not await ID_SCAN_STORE.set_back(body.session_id, res.path):
+        Path(res.path).unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Session error")
+    return {"ok": True}
+
+
+@app.post("/api/id-scan/compose")
+async def api_id_scan_compose(body: IdScanSessionBody):
+    import tempfile
+
+    settings = load_settings()
+    pl = await ID_SCAN_STORE.get_payload(body.session_id)
+    if not pl or not pl.get("front") or not pl.get("back"):
+        raise HTTPException(status_code=400, detail="Scan both sides before composing.")
+    front = Path(str(pl["front"]))
+    back = Path(str(pl["back"]))
+    fd, tmp = tempfile.mkstemp(prefix="kopi-id-composed-", suffix=".pdf")
+    os.close(fd)
+    out_pdf = Path(tmp)
+    ok, err = processor.compose_id_scans_to_a4_pdf(front, back, out_pdf)
+    if not ok:
+        out_pdf.unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=err or "Compose failed")
+
+    ocr_requested = bool(settings.get("id_scan_ocr", False))
+    ocr_applied = False
+    final_pdf = out_pdf
+    if ocr_requested:
+        fd2, tmp2 = tempfile.mkstemp(prefix="kopi-id-ocr-", suffix=".pdf")
+        os.close(fd2)
+        ocr_out = Path(tmp2)
+        ocr_ok, ocr_err = processor.apply_ocrmypdf(out_pdf, ocr_out)
+        if not ocr_ok:
+            out_pdf.unlink(missing_ok=True)
+            ocr_out.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail=ocr_err)
+        out_pdf.unlink(missing_ok=True)
+        final_pdf = ocr_out
+        ocr_applied = True
+
+    if not await ID_SCAN_STORE.set_pdf(body.session_id, str(final_pdf)):
+        final_pdf.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Session error")
+
+    b64, prev_err = processor.pdf_to_preview_png_base64(final_pdf)
+    if b64 is None:
+        log.warning("id_scan_preview_fail: %s", prev_err)
+
+    return {
+        "ok": True,
+        "session_id": body.session_id,
+        "preview_base64": b64,
+        "ocr_applied": ocr_applied,
+    }
+
+
+@app.post("/api/id-scan/print")
+async def api_id_scan_print(body: IdScanSessionBody):
+    settings = load_settings()
+    pl = await ID_SCAN_STORE.get_payload(body.session_id)
+    pdf_path = str(pl.get("pdf") or "") if pl else ""
+    if not pdf_path or not Path(pdf_path).is_file():
+        raise HTTPException(status_code=400, detail="Compose the ID scan before printing.")
+    result = await printer.print_file(
+        pdf_path,
+        duplex=False,
+        job_name="kopi-id-scan",
+        device=str(settings.get("printer_device", "")).strip() or None,
+    )
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
+    msg = "Print job submitted"
+    if result.job_id:
+        msg += f" ({result.job_id})"
+    if result.destination:
+        msg += f" to {result.destination}"
+    return {"ok": True, "message": msg, "job_id": result.job_id, "destination": result.destination}
+
+
+@app.post("/api/id-scan/email")
+async def api_id_scan_email(body: IdScanEmailBody):
+    settings = load_settings()
+    pl = await ID_SCAN_STORE.get_payload(body.session_id)
+    pdf_path = str(pl.get("pdf") or "") if pl else ""
+    if not pdf_path or not Path(pdf_path).is_file():
+        raise HTTPException(status_code=400, detail="Compose the ID scan before emailing.")
+    try:
+        pdf_bytes = Path(pdf_path).read_bytes()
+    except OSError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    ok, err = mailer.send_pdf_email(
+        pdf_bytes,
+        to_addr=body.recipient.strip(),
+        subject=f"ID scan {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
+        smtp=settings.get("smtp", {}),
+    )
+    if not ok:
+        raise HTTPException(status_code=400, detail=err)
+    return {"ok": True, "message": "ID scan emailed"}
+
+
+@app.post("/api/id-scan/discard")
+async def api_id_scan_discard(body: IdScanSessionBody):
+    await ID_SCAN_STORE.discard(body.session_id)
+    return {"ok": True}
 
 
 @app.post("/api/scan")
@@ -290,6 +561,7 @@ def api_admin_settings(x_admin_password: Optional[str] = Header(default=None, al
         "scanner_device": settings.get("scanner_device", ""),
         "printer_device": settings.get("printer_device", ""),
         "usb_roots": settings.get("usb_roots", []),
+        "id_scan_ocr": bool(settings.get("id_scan_ocr", False)),
         "hardware_options": {
             "scanners": scanner.list_scan_devices(),
             "printers": printer.list_printer_queues(),
@@ -312,6 +584,7 @@ def api_admin_settings_put(
     settings["scanner_device"] = body.scanner_device.strip()
     settings["printer_device"] = body.printer_device.strip()
     settings["usb_roots"] = [x.strip() for x in body.usb_roots if x.strip()]
+    settings["id_scan_ocr"] = bool(body.id_scan_ocr)
     save_settings(settings)
     return {"ok": True, "message": "Settings saved"}
 

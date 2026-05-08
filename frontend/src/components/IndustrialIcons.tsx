@@ -105,3 +105,14 @@ export function IconWifi(props: SVGProps<SVGSVGElement>) {
     </IconBase>
   );
 }
+
+export function IconIdCard(props: SVGProps<SVGSVGElement>) {
+  return (
+    <IconBase {...props}>
+      <rect width="20" height="14" x="2" y="5" rx="2" />
+      <path d="M7 15h.01" />
+      <path d="M11 12a2 2 0 0 0-2-2H7a2 2 0 0 0-2 2" />
+      <path d="M2 9h20" />
+    </IconBase>
+  );
+}

@@ -36,6 +36,7 @@ export function AdminPanel() {
   const [scannerDevice, setScannerDevice] = useState("");
   const [printerDevice, setPrinterDevice] = useState("");
   const [usbRootsText, setUsbRootsText] = useState("/media\n/run/media\n/Volumes");
+  const [idScanOcr, setIdScanOcr] = useState(false);
   const [hardwareOptions, setHardwareOptions] = useState<HardwareOptions>({ scanners: [], printers: [] });
   const [modal, setModal] = useState<{ title: string; message: string; variant: "info" | "error" } | null>(
     null,
@@ -67,6 +68,7 @@ export function AdminPanel() {
         setScannerDevice(typeof data.scanner_device === "string" ? data.scanner_device : "");
         setPrinterDevice(typeof data.printer_device === "string" ? data.printer_device : "");
         setUsbRootsText(Array.isArray(data.usb_roots) && data.usb_roots.length > 0 ? data.usb_roots.join("\n") : "/media\n/run/media\n/Volumes");
+        setIdScanOcr(Boolean(data.id_scan_ocr));
         setHardwareOptions({
           scanners: Array.isArray(data?.hardware_options?.scanners) ? data.hardware_options.scanners : [],
           printers: Array.isArray(data?.hardware_options?.printers) ? data.hardware_options.printers : [],
@@ -105,6 +107,7 @@ export function AdminPanel() {
             .split("\n")
             .map((x) => x.trim())
             .filter(Boolean),
+          id_scan_ocr: idScanOcr,
         }),
       });
       if (!res.ok) {
@@ -198,6 +201,14 @@ export function AdminPanel() {
             spellCheck={false}
           />
         </label>
+        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">ID scan</h3>
+        <KioskButton
+          variant={idScanOcr ? "primary" : "secondary"}
+          className="w-full text-lg min-h-[3.5rem]"
+          onClick={() => setIdScanOcr((v) => !v)}
+        >
+          ID Scan OCR (ocrmypdf): {idScanOcr ? "On" : "Off"}
+        </KioskButton>
         <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">SMTP</h3>
         <label className="text-sm text-kiosk-muted">
           Server

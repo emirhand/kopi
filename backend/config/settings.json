@@ -10,5 +10,6 @@
   "admin_password": "1234",
   "scanner_device": "",
   "printer_device": "",
-  "usb_roots": ["/media", "/run/media", "/Volumes"]
+  "usb_roots": ["/media", "/run/media", "/Volumes"],
+  "id_scan_ocr": false
 }

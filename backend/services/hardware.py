@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from .printer import PrintResult, classify_print_error
-from .scanner import ScanResult, build_scanimage_pdf_cmd, classify_scan_error
+from .scanner import ScanResult, ScanFileResult, build_scanimage_pdf_cmd, classify_scan_error
 
 log = logging.getLogger("kopi.hardware")
 
@@ -57,6 +57,15 @@ class ScannerBridge(ABC):
         device: str | None = None,
         timeout_sec: int = 300,
     ) -> ScanResult: ...
+
+    @abstractmethod
+    async def scan_id_side(
+        self,
+        side_name: str,
+        *,
+        device: str | None = None,
+        timeout_sec: int = 180,
+    ) -> ScanFileResult: ...
 
 
 class PrinterBridge(ABC):
@@ -287,6 +296,111 @@ class RealScannerBridge(ScannerBridge):
         log.info("scan_ok mode=real bytes=%d", len(stdout))
         return ScanResult(ok=True, stdout=stdout, stderr=err_text, user_message=None)
 
+    async def scan_id_side(
+        self,
+        side_name: str,
+        *,
+        device: str | None = None,
+        timeout_sec: int = 180,
+    ) -> ScanFileResult:
+        import tempfile
+        from pathlib import Path
+
+        fd, file_path = tempfile.mkstemp(prefix=f"kopi-id-{side_name}-", suffix=".png")
+        os.close(fd)
+        output = Path(file_path)
+        env = os.environ
+        cmd: list[str] = [
+            "scanimage",
+            "--format=png",
+            "-l",
+            "0",
+            "-t",
+            "0",
+            "-x",
+            "86",
+            "-y",
+            "54",
+        ]
+        res_arg = env.get("SCAN_RESOLUTION", "300")
+        cmd.extend(["--resolution", res_arg])
+        dev = device or env.get("SCAN_DEVICE")
+        if dev:
+            cmd.extend(["-d", dev])
+        extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
+        if extra:
+            cmd.extend(extra.split())
+        cmd.extend(["-o", file_path])
+
+        log.info("scan_id_side mode=real side=%s device=%r cmd=%s", side_name, device, " ".join(cmd))
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except FileNotFoundError as e:
+            output.unlink(missing_ok=True)
+            return ScanFileResult(ok=False, path="", stderr=str(e), user_message="Scanner Not Found")
+
+        try:
+            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+        except asyncio.TimeoutError:
+            log.error("scan_id_side_timeout mode=real side=%s", side_name)
+            _kill_quiet(proc)
+            await proc.wait()
+            output.unlink(missing_ok=True)
+            return ScanFileResult(ok=False, path="", stderr="timeout", user_message="Scanner Busy")
+
+        err_text = (stderr or b"").decode(errors="replace")
+        if proc.returncode != 0 and "--resolution" in err_text and "unrecognized option" in err_text:
+            cmd_no_res: list[str] = []
+            skip_next = False
+            for c in cmd:
+                if skip_next:
+                    skip_next = False
+                    continue
+                if c == "--resolution":
+                    skip_next = True
+                    continue
+                cmd_no_res.append(c)
+            log.warning("scan_id_side_retry_no_resolution side=%s", side_name)
+            try:
+                proc2 = await asyncio.create_subprocess_exec(
+                    *cmd_no_res,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _stdout2, stderr = await asyncio.wait_for(proc2.communicate(), timeout=timeout_sec)
+                err_text = (stderr or b"").decode(errors="replace")
+                proc = proc2
+            except (FileNotFoundError, asyncio.TimeoutError) as e:
+                output.unlink(missing_ok=True)
+                return ScanFileResult(
+                    ok=False,
+                    path="",
+                    stderr=str(e),
+                    user_message="Scanner Busy" if isinstance(e, asyncio.TimeoutError) else str(e),
+                )
+
+        if proc.returncode != 0:
+            output.unlink(missing_ok=True)
+            msg = classify_scan_error(err_text) or f"Scanner error: {err_text.strip() or proc.returncode}"
+            log.error("scan_id_side_fail mode=real rc=%s msg=%r", proc.returncode, msg)
+            return ScanFileResult(ok=False, path="", stderr=err_text, user_message=msg)
+
+        try:
+            if output.stat().st_size <= 0:
+                output.unlink(missing_ok=True)
+                return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Scanner returned no data")
+        except OSError as e:
+            output.unlink(missing_ok=True)
+            return ScanFileResult(ok=False, path="", stderr=str(e), user_message=str(e))
+
+        log.info("scan_id_side_ok mode=real side=%s path=%s", side_name, file_path)
+        return ScanFileResult(ok=True, path=file_path, stderr=err_text, user_message=None)
+
 
 class RealPrinterBridge(PrinterBridge):
     async def print_pdf(
@@ -452,6 +566,28 @@ class MockScannerBridge(ScannerBridge):
         pdf = _build_mock_pdf(body)
         log.info("scan_ok mode=mock bytes=%d", len(pdf))
         return ScanResult(ok=True, stdout=pdf, stderr="", user_message=None)
+
+    async def scan_id_side(
+        self,
+        side_name: str,
+        *,
+        device: str | None = None,
+        timeout_sec: int = 180,
+    ) -> ScanFileResult:
+        import tempfile
+        from pathlib import Path
+
+        _ = device, timeout_sec
+        delay = random.uniform(0.4, 1.2)
+        log.info("scan_id_side mode=mock side=%s delay=%.2fs", side_name, delay)
+        await asyncio.sleep(delay)
+        fd, file_path = tempfile.mkstemp(prefix=f"kopi-id-{side_name}-", suffix=".png")
+        os.close(fd)
+        from . import scanner as scanner_mod
+
+        scanner_mod.write_mock_id_scan_png(file_path, side_name)
+        log.info("scan_id_side_ok mode=mock path=%s", file_path)
+        return ScanFileResult(ok=True, path=file_path, stderr="", user_message=None)
 
 
 class MockPrinterBridge(PrinterBridge):

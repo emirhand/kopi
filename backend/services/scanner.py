@@ -6,8 +6,10 @@ import asyncio
 import logging
 import os
 import re
+import struct
 import subprocess
 import tempfile
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Final
@@ -216,3 +218,82 @@ async def scan_copy_image_file(
 
     log.info("scan_copy_file_ok duplex=%s device=%r path=%s", duplex, dev, file_path)
     return ScanFileResult(ok=True, path=file_path, stderr=err_text, user_message=None)
+
+
+def _png_chunk(tag: bytes, data: bytes) -> bytes:
+    crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+    return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+
+def _write_solid_png_rgb(path: str, width: int, height: int, rgb: tuple[int, int, int]) -> None:
+    r, g, b = rgb
+    raw = bytearray()
+    for _y in range(height):
+        raw.append(0)
+        raw.extend(bytes([r, g, b]) * width)
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)
+    idat = zlib.compress(bytes(raw), 9)
+    png = (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", ihdr)
+        + _png_chunk(b"IDAT", idat)
+        + _png_chunk(b"IEND", b"")
+    )
+    Path(path).write_bytes(png)
+
+
+def write_mock_id_scan_png(path: str, side_name: str) -> None:
+    """
+    325×204 mock ID scan for non-Linux / mock hardware.
+    Prefer ImageMagick label; fall back to solid RGB rectangle.
+    """
+    label = "FRONT" if "front" in side_name.lower() else "BACK"
+    color = "#2d6a4f" if label == "FRONT" else "#1d3557"
+    try:
+        subprocess.run(
+            [
+                "magick",
+                "-size",
+                "325x204",
+                f"xc:{color}",
+                "-pointsize",
+                "40",
+                "-fill",
+                "white",
+                "-gravity",
+                "center",
+                "-annotate",
+                "0",
+                label,
+                path,
+            ],
+            check=True,
+            timeout=15,
+            capture_output=True,
+        )
+        return
+    except (OSError, subprocess.CalledProcessError):
+        pass
+    rgb = (45, 106, 79) if label == "FRONT" else (29, 53, 87)
+    _write_solid_png_rgb(path, 325, 204, rgb)
+
+
+async def scan_id_side(
+    side_name: str,
+    *,
+    device: str | None = None,
+    timeout_sec: int = 180,
+) -> ScanFileResult:
+    """Scan one side of an ID-1 card region (86×54 mm) to a PNG file."""
+    from .hardware import get_scanner
+
+    result = await get_scanner().scan_id_side(
+        side_name, device=device, timeout_sec=timeout_sec
+    )
+    log.info(
+        "scan_id_side_facade side=%s ok=%s user_message=%r",
+        side_name,
+        result.ok,
+        result.user_message,
+    )
+    return result
