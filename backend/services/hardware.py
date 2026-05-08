@@ -267,7 +267,7 @@ class RealPrinterBridge(PrinterBridge):
         device: str | None = None,
         timeout_sec: int = 120,
     ) -> PrintResult:
-        cmd: list[str] = ["lp", "-t", "application/pdf", "-J", job_name]
+        cmd: list[str] = ["lp", "-t", job_name]
         if duplex:
             cmd.extend(["-o", "sides=two-sided-long-edge"])
         dest = device or os.environ.get("CUPS_DEST")
