@@ -196,10 +196,10 @@ export function IdScanWizard() {
               disabled={hardwareBusy}
               onClick={() => {
                 void discardSession();
-                nav("/");
+                nav("/copy");
               }}
             >
-              ← Home
+              ← Back
             </KioskButton>
             <div className="col-span-2 flex min-h-0 items-center justify-center rounded-3xl border border-kiosk-industrial-border bg-kiosk-industrial-slate/50 p-4 text-center">
               <div>
@@ -234,10 +234,10 @@ export function IdScanWizard() {
               disabled={hardwareBusy}
               onClick={() => {
                 void discardSession();
-                nav("/");
+                nav("/copy");
               }}
             >
-              ← Home
+              ← Back
             </KioskButton>
             <div className="col-span-2 flex min-h-0 items-center justify-center rounded-3xl border border-emerald-500/30 bg-emerald-950/20 p-4 text-center">
               <div>
@@ -280,10 +280,10 @@ export function IdScanWizard() {
               disabled={hardwareBusy}
               onClick={() => {
                 void discardSession();
-                nav("/");
+                nav("/copy");
               }}
             >
-              ← Home
+              ← Back
             </KioskButton>
             <div className="col-span-2 flex items-center justify-center rounded-3xl border border-kiosk-industrial-border bg-kiosk-industrial-slate/40 px-3">
               <p className="text-center text-sm font-black uppercase tracking-wide text-zinc-300 md:text-base">Preview</p>

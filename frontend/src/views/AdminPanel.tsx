@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { apiUrl, parseErrorDetail } from "../api";
+import { apiUrl, notifyPairingStateChanged, parseErrorDetail } from "../api";
 import { KioskButton } from "../components/KioskButton";
 import { StatusModal } from "../components/StatusModal";
 import { clearAdminSession, getAdminPassword } from "./AdminLogin";
@@ -37,6 +37,11 @@ export function AdminPanel() {
   const [printerDevice, setPrinterDevice] = useState("");
   const [usbRootsText, setUsbRootsText] = useState("/media\n/run/media\n/Volumes");
   const [idScanOcr, setIdScanOcr] = useState(false);
+  const [pairingPin, setPairingPin] = useState("0000");
+  const [newAdminPassword, setNewAdminPassword] = useState("");
+  const [pairedDeviceId, setPairedDeviceId] = useState<string | null>(null);
+  const [pairedDeviceLabel, setPairedDeviceLabel] = useState<string | null>(null);
+  const [pairedAt, setPairedAt] = useState<string | null>(null);
   const [hardwareOptions, setHardwareOptions] = useState<HardwareOptions>({ scanners: [], printers: [] });
   const [modal, setModal] = useState<{ title: string; message: string; variant: "info" | "error" } | null>(
     null,
@@ -67,8 +72,16 @@ export function AdminPanel() {
         setSmtp({ ...emptySmtp, ...data.smtp });
         setScannerDevice(typeof data.scanner_device === "string" ? data.scanner_device : "");
         setPrinterDevice(typeof data.printer_device === "string" ? data.printer_device : "");
-        setUsbRootsText(Array.isArray(data.usb_roots) && data.usb_roots.length > 0 ? data.usb_roots.join("\n") : "/media\n/run/media\n/Volumes");
+        setUsbRootsText(
+          Array.isArray(data.usb_roots) && data.usb_roots.length > 0
+            ? data.usb_roots.join("\n")
+            : "/media\n/run/media\n/Volumes",
+        );
         setIdScanOcr(Boolean(data.id_scan_ocr));
+        setPairingPin(typeof data.pairing_pin === "string" ? data.pairing_pin : "0000");
+        setPairedDeviceId(typeof data.paired_device_id === "string" ? data.paired_device_id : null);
+        setPairedDeviceLabel(typeof data.paired_device_label === "string" ? data.paired_device_label : null);
+        setPairedAt(typeof data.paired_at === "string" ? data.paired_at : null);
         setHardwareOptions({
           scanners: Array.isArray(data?.hardware_options?.scanners) ? data.hardware_options.scanners : [],
           printers: Array.isArray(data?.hardware_options?.printers) ? data.hardware_options.printers : [],
@@ -84,6 +97,42 @@ export function AdminPanel() {
       }
     })();
   }, [nav]);
+
+  async function unpairTablet() {
+    const pw = getAdminPassword();
+    if (!pw) {
+      nav("/admin", { replace: true });
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await fetch(apiUrl("/api/admin/unpair"), {
+        method: "POST",
+        headers: { "X-Admin-Password": pw },
+      });
+      if (!res.ok) {
+        setModal({ title: "Unpair", message: await parseErrorDetail(res), variant: "error" });
+        return;
+      }
+      setPairedDeviceId(null);
+      setPairedDeviceLabel(null);
+      setPairedAt(null);
+      notifyPairingStateChanged();
+      setModal({
+        title: "Tablet Unpaired",
+        message: "The station is now unpaired and ready for a new tablet to claim.",
+        variant: "info",
+      });
+    } catch (e) {
+      setModal({
+        title: "Unpair",
+        message: e instanceof Error ? e.message : "Network error",
+        variant: "error",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function save() {
     const pw = getAdminPassword();
@@ -108,12 +157,15 @@ export function AdminPanel() {
             .map((x) => x.trim())
             .filter(Boolean),
           id_scan_ocr: idScanOcr,
+          pairing_pin: pairingPin.trim() || undefined,
+          new_admin_password: newAdminPassword.trim() || undefined,
         }),
       });
       if (!res.ok) {
         setModal({ title: "Save", message: await parseErrorDetail(res), variant: "error" });
         return;
       }
+      setNewAdminPassword("");
       setModal({ title: "Save", message: "Settings saved.", variant: "info" });
     } catch (e) {
       setModal({
@@ -154,8 +206,57 @@ export function AdminPanel() {
         </KioskButton>
       </div>
 
-      <div className="flex-1 min-h-0 grid grid-cols-1 gap-2 content-start">
-        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted">Hardware</h3>
+      <div className="flex-1 min-h-0 overflow-y-auto grid grid-cols-1 gap-3 content-start pr-1">
+        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted">Tablet Pairing & Security</h3>
+        <div className="rounded-2xl border-2 border-white/15 bg-kiosk-panel p-4 flex items-center justify-between gap-3">
+          <div>
+            <div className="text-base font-bold text-kiosk-text">
+              {pairedDeviceId
+                ? `Paired: ${pairedDeviceLabel || pairedDeviceId}`
+                : "No Tablet Paired"}
+            </div>
+            <div className="text-xs text-kiosk-muted">
+              {pairedDeviceId
+                ? `Device ID: ${pairedDeviceId}${pairedAt ? ` • ${pairedAt}` : ""}`
+                : "Any tablet with the Pairing PIN can claim this station"}
+            </div>
+          </div>
+          {pairedDeviceId && (
+            <KioskButton
+              variant="danger"
+              className="min-h-[3rem] px-4 text-sm shrink-0"
+              disabled={busy}
+              onClick={unpairTablet}
+            >
+              Unpair Tablet
+            </KioskButton>
+          )}
+        </div>
+
+        <div className="grid grid-cols-2 gap-3">
+          <label className="text-sm text-kiosk-muted">
+            Tablet Pairing PIN
+            <input
+              className={`${field} mt-1`}
+              inputMode="numeric"
+              value={pairingPin}
+              onChange={(e) => setPairingPin(e.target.value)}
+            />
+          </label>
+          <label className="text-sm text-kiosk-muted">
+            New Admin PIN (optional)
+            <input
+              className={`${field} mt-1`}
+              type="password"
+              inputMode="numeric"
+              placeholder="Leave blank to keep current"
+              value={newAdminPassword}
+              onChange={(e) => setNewAdminPassword(e.target.value)}
+            />
+          </label>
+        </div>
+
+        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">Hardware</h3>
         <label className="text-sm text-kiosk-muted">
           Scanner device
           <select
@@ -195,7 +296,7 @@ export function AdminPanel() {
         <label className="text-sm text-kiosk-muted">
           USB roots (one per line)
           <textarea
-            className={`${field} mt-1 min-h-[6rem]`}
+            className={`${field} mt-1 min-h-[5rem]`}
             value={usbRootsText}
             onChange={(e) => setUsbRootsText(e.target.value)}
             spellCheck={false}

@@ -1,0 +1,56 @@
+[project]
+name = "kopi"
+version = "0.1.0"
+description = "Linux print/scan/copy station with paired client web interface"
+readme = "README.md"
+authors = [
+    { name = "emirhand", email = "emirhandongel@gmail.com" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115.0",
+    "img2pdf>=0.5.1",
+    "pillow>=11.0.0",
+    "pydantic>=2.10.0",
+    "pypdf>=5.0.0",
+    "python-dotenv>=1.0.1",
+    "python-multipart>=0.0.12",
+    "uvicorn[standard]>=0.32.0",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.27.0",
+    "mypy>=1.13.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "ruff>=0.8.0",
+]
+
+[project.scripts]
+kopi = "kopi.main:run"
+
+[build-system]
+requires = ["uv_build>=0.12.24,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+warn_return_any = true
+warn_unused_ignores = true
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["img2pdf"]
+ignore_missing_imports = true
+
+

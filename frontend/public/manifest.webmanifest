@@ -1,0 +1,10 @@
+{
+  "name": "Kopi Smart Copier",
+  "short_name": "Kopi",
+  "description": "Touchscreen Control Panel for Kopi Smart Copier Station",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "landscape",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a"
+}

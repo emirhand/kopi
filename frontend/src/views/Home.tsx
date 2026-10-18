@@ -4,8 +4,6 @@ import { apiUrl } from "../api";
 import {
   IconCopy,
   IconDroplets,
-  IconIdCard,
-  IconInfo,
   IconLock,
   IconScanLine,
   IconUsb,
@@ -19,7 +17,7 @@ import { KOPI_USB_MOUNT_STORAGE_KEY } from "../usbStorage";
 export type { UsbVolumeInfo } from "../types/hardware";
 
 function formatClock(d: Date) {
-  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+  return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
 }
 
 function formatDate(d: Date) {
@@ -193,86 +191,90 @@ export function Home() {
         onRefresh={refreshHardware}
       />
 
-      {/* Top bar — pinned */}
+      {/* Top dashboard bar — HP 9010 style with Clock & Admin button */}
       <header className="flex shrink-0 items-center justify-between border-b border-kiosk-industrial-border bg-kiosk-industrial-navy px-4 py-3 md:px-6 md:py-3.5">
         <div className="min-w-0">
-          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">Kopi</p>
-          <p className="truncate text-lg font-bold tracking-tight text-zinc-100 md:text-xl">Smart Copier</p>
+          <p className="text-[10px] font-semibold uppercase tracking-[0.2em] text-zinc-500">
+            HP OfficeJet Pro 9010
+          </p>
+          <p className="truncate text-lg font-bold tracking-tight text-zinc-100 md:text-xl">
+            Kopi Smart Station
+          </p>
         </div>
-        <div className="flex flex-col items-end gap-0.5 text-right">
+
+        <div className="flex flex-col items-center gap-0.5 text-center">
           <time className="font-mono text-xl font-semibold tabular-nums text-zinc-100 md:text-2xl" dateTime={now.toISOString()}>
             {formatClock(now)}
           </time>
           <p className="text-xs text-zinc-500">{formatDate(now)}</p>
         </div>
-        <div className="flex min-w-[7rem] flex-col items-end gap-0.5 text-right md:min-w-[9rem]">
-          <p className={`text-sm font-bold uppercase tracking-wide ${statusColor}`}>{statusLabel}</p>
-          <p className="text-[10px] uppercase tracking-wider text-zinc-500">System</p>
+
+        <div className="flex items-center gap-3">
+          <div className="hidden flex-col items-end gap-0.5 text-right sm:flex">
+            <p className={`text-sm font-bold uppercase tracking-wide ${statusColor}`}>{statusLabel}</p>
+            <p className="text-[10px] uppercase tracking-wider text-zinc-500">System</p>
+          </div>
+          <button
+            type="button"
+            onClick={() => nav("/admin")}
+            aria-label="Admin — PIN required"
+            className="flex h-11 items-center gap-2 rounded-xl border border-amber-500/40 bg-kiosk-industrial-slate px-3.5 text-xs font-black uppercase tracking-wider text-amber-300 ring-1 ring-amber-500/20 active:scale-95"
+          >
+            <IconLock className="h-4 w-4 text-amber-400" />
+            <span>Admin</span>
+          </button>
         </div>
       </header>
 
-      {/* Main 3×2 grid — centered, locked viewport */}
-      <main className="flex min-h-0 flex-1 items-center justify-center px-4 py-3 md:px-8 md:py-5">
-        <div
-          className="grid min-h-0 w-full grid-cols-3 grid-rows-2 gap-3 md:gap-4"
-          style={{
-            width: "min(92vw, calc((100dvh - 9.5rem) * 3 / 2))",
-            height: "min(calc(100dvh - 9.5rem), calc(min(92vw, (100dvh - 9.5rem) * 3 / 2) * 2 / 3))",
-          }}
+      {/* Main HP 9010 3-Card Home Menu: Copy, Scan, Print from USB */}
+      <main className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col justify-center gap-4 px-4 py-3 md:grid md:grid-cols-3 md:items-stretch md:gap-6 md:px-8 md:py-6">
+        <KioskButton
+          layout="tile"
+          variant="industrial"
+          icon={<IconCopy className="text-emerald-400" />}
+          className="min-h-[8.5rem] md:min-h-[16rem]"
+          onClick={() => nav("/copy")}
         >
-          <KioskButton
-            layout="tile"
-            variant="industrial"
-            icon={<IconCopy className="text-emerald-400" />}
-            className="min-h-0 min-w-0"
-            onClick={() => nav("/copy")}
-          >
+          <span className="block text-2xl font-black uppercase tracking-wide md:text-3xl">
             Copy
-          </KioskButton>
+          </span>
+          <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
+            Document, ID Card & Photo Copy
+          </span>
+        </KioskButton>
 
-          <KioskButton
-            layout="tile"
-            variant="industrial"
-            icon={<IconScanLine className="text-cyan-400" />}
-            className="min-h-0 min-w-0"
-            onClick={() => nav("/scan")}
-          >
+        <KioskButton
+          layout="tile"
+          variant="industrial"
+          icon={<IconScanLine className="text-cyan-400" />}
+          className="min-h-[8.5rem] md:min-h-[16rem]"
+          onClick={() => nav("/scan")}
+        >
+          <span className="block text-2xl font-black uppercase tracking-wide md:text-3xl">
             Scan
-          </KioskButton>
+          </span>
+          <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
+            Scan to Email, USB Drive & Archive
+          </span>
+        </KioskButton>
 
-          <KioskButton layout="tile" variant="industrialMuted" icon={<IconUsb className="text-zinc-500" />} disabled badge="Soon">
+        <KioskButton
+          layout="tile"
+          variant="industrial"
+          icon={<IconUsb className="text-amber-400" />}
+          className="min-h-[8.5rem] md:min-h-[16rem]"
+          onClick={() => nav("/usb-print")}
+        >
+          <span className="block text-2xl font-black uppercase tracking-wide md:text-3xl">
             USB Print
-          </KioskButton>
-
-          <KioskButton
-            layout="tile"
-            variant="industrial"
-            icon={<IconIdCard className="text-violet-400" />}
-            className="min-h-0 min-w-0"
-            onClick={() => nav("/id-scan")}
-          >
-            ID Scan
-          </KioskButton>
-
-          <KioskButton layout="tile" variant="industrialMuted" icon={<IconInfo className="text-zinc-500" />} disabled badge="Soon">
-            System Info
-          </KioskButton>
-
-          <KioskButton
-            layout="tile"
-            variant="industrial"
-            icon={<IconLock className="text-amber-400" />}
-            className="min-h-0 min-w-0 ring-1 ring-amber-500/30"
-            badge="PIN"
-            onClick={() => nav("/admin")}
-            aria-label="Admin — PIN required"
-          >
-            Admin
-          </KioskButton>
-        </div>
+          </span>
+          <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
+            Browse & Print Files from USB Flash Drive
+          </span>
+        </KioskButton>
       </main>
 
-      {/* Bottom bar — pinned */}
+      {/* Bottom status bar — pinned */}
       <footer className="flex shrink-0 items-stretch justify-between gap-2 border-t border-kiosk-industrial-border bg-kiosk-industrial-navy px-3 py-2.5 md:px-6 md:py-3">
         <div className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-kiosk-industrial-border/80 bg-kiosk-industrial-slate/50 px-3 py-2">
           <IconDroplets className="h-5 w-5 shrink-0 text-zinc-500" />
