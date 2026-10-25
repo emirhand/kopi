@@ -141,7 +141,7 @@ Settings live in `config/settings.json` at the repository root (created on first
 | `SETTINGS_PATH` | `config/settings.json` | Settings file location. |
 | `KOPI_REQUIRE_PAIRING` | `1` | Set `0` to allow unpaired access. |
 | `KOPI_FRONTEND_DIST` | `frontend/dist` | Built frontend directory. |
-| `CORS_ORIGINS` | `*` | Comma-separated allowed origins. |
+| `CORS_ORIGINS` | station origin | Comma-separated allowed origins (not needed in normal use since the UI is served from the same origin). |
 | `KOPI_SCAN_TTL_SEC` | `300` | How long a scan stays cached before expiry. |
 | `KOPI_ID_SCAN_TTL_SEC` | see code | ID-scan session lifetime. |
 | `KOPI_ARCHIVE_DIR` | `data/archive` | Where "scan to archive" saves files. |
@@ -183,7 +183,7 @@ cd frontend && npm run build   # type-check and build the UI
 - The default admin password and pairing PIN are **weak and well known**. Change them in the admin panel before putting a station on a shared network.
 - SMTP and admin credentials are stored as plain JSON on disk. Keep the settings file readable by the service user only.
 - There is no rate limiting on PIN or password attempts.
-- CORS defaults to `*`. Set `CORS_ORIGINS` for any real deployment.
+- CORS defaults to the station's own origin (the UI is served from the same origin anyway). Set `CORS_ORIGINS` only if hosting the frontend on a separate origin.
 - Pending scans are cached in memory and in temporary files. The cache is single-process and ephemeral, so a restart drops pending scan IDs.
 - Intended for a locked-down appliance on a trusted network, **not** for the open internet.
 

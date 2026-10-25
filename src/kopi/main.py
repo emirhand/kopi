@@ -37,6 +37,28 @@ def _resolve_frontend_dist() -> Path:
     return Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
+def _resolve_cors_origins() -> list[str]:
+    """Return allowed CORS origins, defaulting to the station's own origins.
+
+    Note: Both the built SPA (served by FastAPI) and the Vite dev server (which
+    proxies `/api` to the backend) make same-origin requests, so cross-origin
+    access is not needed unless explicitly configured via `CORS_ORIGINS`.
+    """
+    raw = os.environ.get("CORS_ORIGINS", "").strip()
+    if raw:
+        origins = [origin.strip() for origin in raw.split(",") if origin.strip() and origin.strip() != "*"]
+        if origins:
+            return origins
+    hostname = socket.gethostname()
+    port = int(os.environ.get("PORT", "8000"))
+    return [
+        f"http://{hostname}.local:{port}",
+        f"http://{hostname}:{port}",
+        f"http://localhost:{port}",
+        f"http://127.0.0.1:{port}",
+    ]
+
+
 def create_app() -> FastAPI:
     """Create and configure the Kopi FastAPI application instance."""
     setup_logging()
@@ -44,7 +66,7 @@ def create_app() -> FastAPI:
 
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=os.environ.get("CORS_ORIGINS", "*").split(","),
+        allow_origins=_resolve_cors_origins(),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

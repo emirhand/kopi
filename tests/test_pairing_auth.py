@@ -158,3 +158,56 @@ async def test_pairing_lifecycle_exclusive_lock_and_tablet_replacement(
 
         st_after = await client_b.get("/api/pair/status")
         assert st_after.json()["paired"] is False
+
+
+@pytest.mark.asyncio
+async def test_pair_claim_and_replace_rate_limiting(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify /api/pair/claim and /api/pair/replace enforce attempt limits and lockout delays."""
+    from kopi.auth.rate_limit import get_auth_rate_limiter
+
+    monkeypatch.setenv("KOPI_AUTH_MAX_ATTEMPTS", "3")
+    monkeypatch.setenv("KOPI_AUTH_LOCKOUT_SECONDS", "20")
+
+    fake_now = [500.0]
+    limiter = get_auth_rate_limiter()
+    monkeypatch.setattr(limiter, "clock", lambda: fake_now[0])
+
+    settings = load_settings()
+    settings.pairing_pin = "2468"
+    settings.admin_password = "9999"
+    save_settings(settings)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        # 3 wrong PIN attempts on /api/pair/claim return 403
+        for _ in range(3):
+            r = await client.post("/api/pair/claim", json={"pin": "0000"})
+            assert r.status_code == 403
+
+        # Next attempt is locked out with 429 + Retry-After header
+        locked = await client.post("/api/pair/claim", json={"pin": "2468"})
+        assert locked.status_code == 429
+        assert locked.headers.get("Retry-After") == "20"
+
+        # Wait out the 20s delay, then claim with valid PIN
+        fake_now[0] += 21.0
+        claimed = await client.post("/api/pair/claim", json={"pin": "2468"})
+        assert claimed.status_code == 200
+
+        # Now test /api/pair/replace lockout after 3 wrong admin passwords
+        for _ in range(3):
+            r = await client.post("/api/pair/replace", json={"admin_password": "0000"})
+            assert r.status_code == 403
+
+        replace_locked = await client.post(
+            "/api/pair/replace", json={"admin_password": "9999"}
+        )
+        assert replace_locked.status_code == 429
+        assert replace_locked.headers.get("Retry-After") == "20"
+
+        fake_now[0] += 21.0
+        replaced = await client.post(
+            "/api/pair/replace", json={"admin_password": "9999"}
+        )
+        assert replaced.status_code == 200

@@ -8,10 +8,12 @@ from fastapi import APIRouter, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from kopi.auth.pairing import get_pairing_provider
+from kopi.auth.rate_limit import get_auth_rate_limiter
 from kopi.config import SmtpConfig, load_settings, save_settings, verify_admin_password
 from kopi.hardware import list_printer_queues, list_scan_devices
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
+ADMIN_AUTH_SCOPE = "admin_password"
 
 
 class AdminVerifyBody(BaseModel):
@@ -31,15 +33,25 @@ class AdminSettingsUpdate(BaseModel):
 def _require_admin(x_admin_password: str | None) -> None:
     if not x_admin_password:
         raise HTTPException(status_code=401, detail="Admin password required")
+    limiter = get_auth_rate_limiter()
+    limiter.check(ADMIN_AUTH_SCOPE)
     settings = load_settings()
     if not verify_admin_password(settings, x_admin_password):
+        limiter.record_failure(ADMIN_AUTH_SCOPE)
         raise HTTPException(status_code=403, detail="Invalid admin password")
+    limiter.record_success(ADMIN_AUTH_SCOPE)
 
 
 @router.post("/verify")
 async def api_admin_verify(body: AdminVerifyBody) -> dict[str, bool]:
+    limiter = get_auth_rate_limiter()
+    limiter.check(ADMIN_AUTH_SCOPE)
     settings = load_settings()
     valid = verify_admin_password(settings, body.password)
+    if valid:
+        limiter.record_success(ADMIN_AUTH_SCOPE)
+    else:
+        limiter.record_failure(ADMIN_AUTH_SCOPE)
     return {"valid": valid}
 
 
@@ -49,13 +61,15 @@ async def api_admin_settings(
 ) -> dict[str, Any]:
     _require_admin(x_admin_password)
     settings = load_settings()
+    smtp_data = settings.smtp.model_dump(exclude={"password"})
+    smtp_data["password_set"] = bool(settings.smtp.password)
     return {
-        "smtp": settings.smtp.model_dump(),
+        "smtp": smtp_data,
         "scanner_device": settings.scanner_device,
         "printer_device": settings.printer_device,
         "usb_roots": settings.usb_roots,
         "id_scan_ocr": settings.id_scan_ocr,
-        "pairing_pin": settings.pairing_pin,
+        "pairing_pin_set": bool(settings.pairing_pin),
         "paired_device_id": settings.paired_device_id,
         "paired_device_label": settings.paired_device_label,
         "paired_at": settings.paired_at,
@@ -73,7 +87,10 @@ async def api_admin_settings_put(
 ) -> dict[str, Any]:
     _require_admin(x_admin_password)
     settings = load_settings()
+    existing_smtp_password = settings.smtp.password
     settings.smtp = body.smtp
+    if not body.smtp.password:
+        settings.smtp.password = existing_smtp_password
     settings.scanner_device = body.scanner_device.strip()
     settings.printer_device = body.printer_device.strip()
     settings.usb_roots = [x.strip() for x in body.usb_roots if x.strip()]

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { apiUrl, notifyPairingStateChanged, parseErrorDetail } from "../api";
 import { KioskButton } from "../components/KioskButton";
 import { StatusModal } from "../components/StatusModal";
-import { clearAdminSession, getAdminPassword } from "./AdminLogin";
+import { clearAdminSession, getAdminPassword, setAdminPassword } from "./AdminLogin";
 
 type Smtp = {
   host: string;
@@ -31,13 +31,15 @@ const emptySmtp: Smtp = {
 export function AdminPanel() {
   const nav = useNavigate();
   const [smtp, setSmtp] = useState<Smtp>(emptySmtp);
+  const [smtpPasswordSet, setSmtpPasswordSet] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [scannerDevice, setScannerDevice] = useState("");
   const [printerDevice, setPrinterDevice] = useState("");
   const [usbRootsText, setUsbRootsText] = useState("/media\n/run/media\n/Volumes");
   const [idScanOcr, setIdScanOcr] = useState(false);
-  const [pairingPin, setPairingPin] = useState("0000");
+  const [pairingPin, setPairingPin] = useState("");
+  const [pairingPinSet, setPairingPinSet] = useState(false);
   const [newAdminPassword, setNewAdminPassword] = useState("");
   const [pairedDeviceId, setPairedDeviceId] = useState<string | null>(null);
   const [pairedDeviceLabel, setPairedDeviceLabel] = useState<string | null>(null);
@@ -69,7 +71,15 @@ export function AdminPanel() {
           return;
         }
         const data = await res.json();
-        setSmtp({ ...emptySmtp, ...data.smtp });
+        setSmtp({
+          host: typeof data.smtp?.host === "string" ? data.smtp.host : "",
+          port: typeof data.smtp?.port === "number" ? data.smtp.port : 587,
+          user: typeof data.smtp?.user === "string" ? data.smtp.user : "",
+          password: "",
+          from_email: typeof data.smtp?.from_email === "string" ? data.smtp.from_email : "",
+          tls: typeof data.smtp?.tls === "boolean" ? data.smtp.tls : true,
+        });
+        setSmtpPasswordSet(Boolean(data.smtp?.password_set));
         setScannerDevice(typeof data.scanner_device === "string" ? data.scanner_device : "");
         setPrinterDevice(typeof data.printer_device === "string" ? data.printer_device : "");
         setUsbRootsText(
@@ -78,7 +88,8 @@ export function AdminPanel() {
             : "/media\n/run/media\n/Volumes",
         );
         setIdScanOcr(Boolean(data.id_scan_ocr));
-        setPairingPin(typeof data.pairing_pin === "string" ? data.pairing_pin : "0000");
+        setPairingPin("");
+        setPairingPinSet(Boolean(data.pairing_pin_set));
         setPairedDeviceId(typeof data.paired_device_id === "string" ? data.paired_device_id : null);
         setPairedDeviceLabel(typeof data.paired_device_label === "string" ? data.paired_device_label : null);
         setPairedAt(typeof data.paired_at === "string" ? data.paired_at : null);
@@ -142,6 +153,7 @@ export function AdminPanel() {
     }
     setBusy(true);
     try {
+      const newAdminPw = newAdminPassword.trim();
       const res = await fetch(apiUrl("/api/admin/settings"), {
         method: "PUT",
         headers: {
@@ -158,12 +170,23 @@ export function AdminPanel() {
             .filter(Boolean),
           id_scan_ocr: idScanOcr,
           pairing_pin: pairingPin.trim() || undefined,
-          new_admin_password: newAdminPassword.trim() || undefined,
+          new_admin_password: newAdminPw || undefined,
         }),
       });
       if (!res.ok) {
         setModal({ title: "Save", message: await parseErrorDetail(res), variant: "error" });
         return;
+      }
+      if (newAdminPw) {
+        setAdminPassword(newAdminPw);
+      }
+      if (smtp.password) {
+        setSmtpPasswordSet(true);
+        setSmtp((s) => ({ ...s, password: "" }));
+      }
+      if (pairingPin.trim()) {
+        setPairingPinSet(true);
+        setPairingPin("");
       }
       setNewAdminPassword("");
       setModal({ title: "Save", message: "Settings saved.", variant: "info" });
@@ -235,10 +258,12 @@ export function AdminPanel() {
 
         <div className="grid grid-cols-2 gap-3">
           <label className="text-sm text-kiosk-muted">
-            Tablet Pairing PIN
+            New Tablet Pairing PIN (optional)
             <input
               className={`${field} mt-1`}
+              type="password"
               inputMode="numeric"
+              placeholder={pairingPinSet ? "Leave blank to keep current" : "Not set"}
               value={pairingPin}
               onChange={(e) => setPairingPin(e.target.value)}
             />
@@ -344,6 +369,7 @@ export function AdminPanel() {
           <input
             className={`${field} mt-1`}
             type="password"
+            placeholder={smtpPasswordSet ? "Leave blank to keep current" : "Not set"}
             value={smtp.password}
             onChange={(e) => setSmtp((s) => ({ ...s, password: e.target.value }))}
             autoComplete="new-password"

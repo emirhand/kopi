@@ -9,13 +9,21 @@ from kopi.auth.pairing import (
     StaticPinPairingProvider,
     get_pairing_provider,
 )
+from kopi.auth.rate_limit import (
+    AuthRateLimiter,
+    get_auth_rate_limiter,
+    reset_auth_rate_limiter,
+)
 
 __all__ = [
+    "AuthRateLimiter",
     "PairingClaimResult",
     "PairingProvider",
     "PairingStatus",
     "StaticPinPairingProvider",
     "extract_device_token",
+    "get_auth_rate_limiter",
     "get_pairing_provider",
     "require_paired_client",
+    "reset_auth_rate_limiter",
 ]

@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from fastapi import HTTPException
 
 from kopi.auth.models import PairingClaimResult, PairingStatus
+from kopi.auth.rate_limit import get_auth_rate_limiter
 from kopi.config import (
     KopiSettings,
     load_settings,
@@ -20,6 +21,9 @@ from kopi.config import (
     verify_admin_password,
     verify_pairing_pin,
 )
+
+PAIRING_PIN_SCOPE = "pairing_pin"
+ADMIN_AUTH_SCOPE = "admin_password"
 
 
 def _hash_token(raw_token: str) -> str:
@@ -110,6 +114,8 @@ class StaticPinPairingProvider(PairingProvider):
         )
 
     def claim(self, pin: str, device_label: str | None = None) -> PairingClaimResult:
+        limiter = get_auth_rate_limiter()
+        limiter.check(PAIRING_PIN_SCOPE)
         settings = load_settings()
         if (settings.paired_device_token_hash or "").strip():
             raise HTTPException(
@@ -120,7 +126,9 @@ class StaticPinPairingProvider(PairingProvider):
                 ),
             )
         if not verify_pairing_pin(settings, pin):
+            limiter.record_failure(PAIRING_PIN_SCOPE)
             raise HTTPException(status_code=403, detail="Invalid pairing PIN")
+        limiter.record_success(PAIRING_PIN_SCOPE)
         return self._issue_pairing(settings, device_label)
 
     def replace_with_admin(
@@ -128,9 +136,13 @@ class StaticPinPairingProvider(PairingProvider):
         admin_password: str,
         device_label: str | None = None,
     ) -> PairingClaimResult:
+        limiter = get_auth_rate_limiter()
+        limiter.check(ADMIN_AUTH_SCOPE)
         settings = load_settings()
         if not verify_admin_password(settings, admin_password):
+            limiter.record_failure(ADMIN_AUTH_SCOPE)
             raise HTTPException(status_code=403, detail="Invalid Admin PIN")
+        limiter.record_success(ADMIN_AUTH_SCOPE)
         return self._issue_pairing(settings, device_label)
 
     def unpair(self) -> None:

@@ -91,6 +91,10 @@ export function getAdminPassword(): string | null {
   return sessionStorage.getItem(SESSION_KEY);
 }
 
+export function setAdminPassword(pw: string) {
+  sessionStorage.setItem(SESSION_KEY, pw);
+}
+
 export function clearAdminSession() {
   sessionStorage.removeItem(SESSION_KEY);
 }
