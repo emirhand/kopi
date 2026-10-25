@@ -12,6 +12,7 @@ import sys
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import uvicorn
 from fastapi import Depends, FastAPI, HTTPException
@@ -22,7 +23,12 @@ from fastapi.staticfiles import StaticFiles
 from kopi.api import admin, copy, hardware, id_scan, pairing, scan, usb_print
 from kopi.auth.dependencies import require_paired_client
 from kopi.auth.pairing import get_pairing_provider
-from kopi.config import get_settings_path, load_settings
+from kopi.config import (
+    get_settings_path,
+    is_admin_password_managed,
+    is_pairing_pin_managed,
+    load_settings,
+)
 
 log = logging.getLogger("kopi.main")
 
@@ -44,6 +50,22 @@ def _resolve_frontend_dist() -> Path:
     return Path(__file__).resolve().parents[2] / "frontend" / "dist"
 
 
+def _resolve_public_url() -> str | None:
+    """Resolve and validate KOPI_PUBLIC_URL (http/https, trailing slash stripped)."""
+    raw = os.environ.get("KOPI_PUBLIC_URL", "").strip()
+    if not raw:
+        return None
+    normalized = raw.rstrip("/")
+    parsed = urlsplit(normalized)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        log.warning(
+            "Ignoring invalid KOPI_PUBLIC_URL %r (must be an http:// or https:// URL).",
+            raw,
+        )
+        return None
+    return normalized
+
+
 def _resolve_cors_origins() -> list[str]:
     """Return allowed CORS origins, defaulting to the station's own origins.
 
@@ -51,19 +73,30 @@ def _resolve_cors_origins() -> list[str]:
     proxies `/api` to the backend) make same-origin requests, so cross-origin
     access is not needed unless explicitly configured via `CORS_ORIGINS`.
     """
+    origins: list[str] = []
     raw = os.environ.get("CORS_ORIGINS", "").strip()
     if raw:
-        origins = [origin.strip() for origin in raw.split(",") if origin.strip() and origin.strip() != "*"]
-        if origins:
-            return origins
-    hostname = socket.gethostname()
-    port = int(os.environ.get("PORT", "8000"))
-    return [
-        f"http://{hostname}.local:{port}",
-        f"http://{hostname}:{port}",
-        f"http://localhost:{port}",
-        f"http://127.0.0.1:{port}",
-    ]
+        origins = [
+            origin.strip()
+            for origin in raw.split(",")
+            if origin.strip() and origin.strip() != "*"
+        ]
+    if not origins:
+        hostname = socket.gethostname()
+        port = int(os.environ.get("PORT", "8000"))
+        origins = [
+            f"http://{hostname}.local:{port}",
+            f"http://{hostname}:{port}",
+            f"http://localhost:{port}",
+            f"http://127.0.0.1:{port}",
+        ]
+    public_url = _resolve_public_url()
+    if public_url:
+        parsed = urlsplit(public_url)
+        public_origin = f"{parsed.scheme.lower()}://{parsed.netloc}"
+        if public_origin not in origins:
+            origins.append(public_origin)
+    return origins
 
 
 def sweep_orphaned_temp_files(temp_dir: Path | None = None) -> int:
@@ -104,6 +137,7 @@ async def _periodic_store_purge_loop(interval_sec: float) -> None:
 
 @contextlib.asynccontextmanager
 async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    load_settings()
     raw_interval = os.environ.get("KOPI_PURGE_INTERVAL_SEC", "60").strip()
     try:
         interval = max(1.0, float(raw_interval))
@@ -121,6 +155,16 @@ async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     """Create and configure the Kopi FastAPI application instance."""
     setup_logging()
+    settings_path = get_settings_path()
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_dir = scan._get_archive_dir()
+    dist_dir = _resolve_frontend_dist()
+    log.info(
+        "kopi_paths settings_path=%s archive_dir=%s frontend_dist=%s",
+        settings_path,
+        archive_dir,
+        dist_dir,
+    )
     sweep_orphaned_temp_files()
     application = FastAPI(
         title="Kopi — Linux Smart Copier Appliance",
@@ -145,7 +189,6 @@ def create_app() -> FastAPI:
     application.include_router(usb_print.router, dependencies=paired_deps)
     application.include_router(admin.router)
 
-    dist_dir = _resolve_frontend_dist()
     index_html = dist_dir / "index.html"
     if dist_dir.is_dir() and index_html.is_file():
         assets_dir = dist_dir / "assets"
@@ -168,6 +211,11 @@ def create_app() -> FastAPI:
             ):
                 return FileResponse(str(candidate))
             return FileResponse(str(index_html))
+    else:
+        log.warning(
+            "Frontend dist directory or index.html not found at %s; SPA will not be served.",
+            dist_dir,
+        )
 
     return application
 
@@ -176,12 +224,19 @@ def create_app() -> FastAPI:
 app = create_app()
 
 
-def _cli_status() -> None:
+def _cli_status(*, show_secrets: bool = False) -> None:
     settings = load_settings()
     hostname = socket.gethostname()
+    pin_source = " (managed externally)" if is_pairing_pin_managed() else ""
+    admin_source = " (managed externally)" if is_admin_password_managed() else ""
     print(f"Kopi Station ({hostname})")
     print(f"  Settings file : {get_settings_path()}")
-    print(f"  Pairing PIN   : {settings.pairing_pin}")
+    if show_secrets:
+        print(f"  Pairing PIN   : {settings.pairing_pin}{pin_source}")
+        print(f"  Admin PIN     : {settings.admin_password}{admin_source}")
+    else:
+        print(f"  Pairing PIN   : hidden (pass --show-secrets to print){pin_source}")
+        print(f"  Admin PIN     : hidden (pass --show-secrets to print){admin_source}")
     print(f"  Paired device : {settings.paired_device_label or 'Unpaired'}")
     if settings.paired_device_id:
         print(f"  Device ID     : {settings.paired_device_id} (since {settings.paired_at})")
@@ -196,10 +251,11 @@ def _cli_setup_sheet() -> None:
     settings = load_settings()
     hostname = socket.gethostname()
     port = int(os.environ.get("PORT", "8000"))
+    station_url = _resolve_public_url() or f"http://{hostname}.local:{port}"
     print("========================================")
     print("       KOPI SMART COPIER STATION        ")
     print("========================================")
-    print(f"Station URL : http://{hostname}.local:{port}")
+    print(f"Station URL : {station_url}")
     print(f"Pairing PIN : {settings.pairing_pin}")
     print("----------------------------------------")
     print("1. Connect tablet to the station Wi-Fi")
@@ -211,9 +267,12 @@ def _cli_setup_sheet() -> None:
 
 def run() -> None:
     """Entry point for `uv run kopi [serve|status|unpair|print-setup-sheet]`."""
-    cmd = sys.argv[1].strip().lower() if len(sys.argv) > 1 else "serve"
+    args = [a.strip() for a in sys.argv[1:] if a.strip()]
+    flags = {a for a in args if a.startswith("-")}
+    positional = [a.lower() for a in args if not a.startswith("-")]
+    cmd = positional[0] if positional else "serve"
     if cmd == "status":
-        _cli_status()
+        _cli_status(show_secrets="--show-secrets" in flags)
         return
     if cmd == "unpair":
         _cli_unpair()
@@ -223,7 +282,9 @@ def run() -> None:
         return
 
     port = int(os.environ.get("PORT", "8000"))
-    reload_enabled = os.environ.get("KOPI_RELOAD", "1").strip().lower() in {"1", "true", "yes"}
+    # Default reload to off: file-change restarts drop in-memory scan/rate-limit
+    # state and re-run the startup temp-file sweep, deleting pending scan files.
+    reload_enabled = os.environ.get("KOPI_RELOAD", "0").strip().lower() in {"1", "true", "yes"}
     uvicorn.run("kopi.main:app", host="0.0.0.0", port=port, reload=reload_enabled)
 
 

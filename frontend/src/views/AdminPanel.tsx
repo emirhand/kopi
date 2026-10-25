@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { apiUrl, notifyPairingStateChanged, parseErrorDetail } from "../api";
 import { KioskButton } from "../components/KioskButton";
 import { StatusModal } from "../components/StatusModal";
+import type { AdminSettingsResponse, HardwareOptions } from "../types/hardware";
 import { clearAdminSession, getAdminPassword, setAdminPassword } from "./AdminLogin";
 
 type Smtp = {
@@ -12,11 +13,6 @@ type Smtp = {
   password: string;
   from_email: string;
   tls: boolean;
-};
-
-type HardwareOptions = {
-  scanners: string[];
-  printers: string[];
 };
 
 const emptySmtp: Smtp = {
@@ -39,7 +35,9 @@ export function AdminPanel() {
   const [idScanOcr, setIdScanOcr] = useState(false);
   const [pairingPin, setPairingPin] = useState("");
   const [pairingPinSet, setPairingPinSet] = useState(false);
+  const [pairingPinManaged, setPairingPinManaged] = useState(false);
   const [newAdminPassword, setNewAdminPassword] = useState("");
+  const [adminPasswordManaged, setAdminPasswordManaged] = useState(false);
   const [pairedDeviceId, setPairedDeviceId] = useState<string | null>(null);
   const [pairedDeviceLabel, setPairedDeviceLabel] = useState<string | null>(null);
   const [pairedAt, setPairedAt] = useState<string | null>(null);
@@ -69,7 +67,7 @@ export function AdminPanel() {
           setModal({ title: "Settings", message: await parseErrorDetail(res), variant: "error" });
           return;
         }
-        const data = await res.json();
+        const data: AdminSettingsResponse = await res.json();
         setSmtp({
           host: typeof data.smtp?.host === "string" ? data.smtp.host : "",
           port: typeof data.smtp?.port === "number" ? data.smtp.port : 587,
@@ -84,6 +82,8 @@ export function AdminPanel() {
         setIdScanOcr(Boolean(data.id_scan_ocr));
         setPairingPin("");
         setPairingPinSet(Boolean(data.pairing_pin_set));
+        setPairingPinManaged(Boolean(data.pairing_pin_managed));
+        setAdminPasswordManaged(Boolean(data.admin_password_managed));
         setPairedDeviceId(typeof data.paired_device_id === "string" ? data.paired_device_id : null);
         setPairedDeviceLabel(typeof data.paired_device_label === "string" ? data.paired_device_label : null);
         setPairedAt(typeof data.paired_at === "string" ? data.paired_at : null);
@@ -147,7 +147,8 @@ export function AdminPanel() {
     }
     setBusy(true);
     try {
-      const newAdminPw = newAdminPassword.trim();
+      const newAdminPw = adminPasswordManaged ? "" : newAdminPassword.trim();
+      const newPin = pairingPinManaged ? "" : pairingPin.trim();
       const res = await fetch(apiUrl("/api/admin/settings"), {
         method: "PUT",
         headers: {
@@ -159,7 +160,7 @@ export function AdminPanel() {
           scanner_device: scannerDevice,
           printer_device: printerDevice,
           id_scan_ocr: idScanOcr,
-          pairing_pin: pairingPin.trim() || undefined,
+          pairing_pin: newPin || undefined,
           new_admin_password: newAdminPw || undefined,
         }),
       });
@@ -174,7 +175,7 @@ export function AdminPanel() {
         setSmtpPasswordSet(true);
         setSmtp((s) => ({ ...s, password: "" }));
       }
-      if (pairingPin.trim()) {
+      if (newPin) {
         setPairingPinSet(true);
         setPairingPin("");
       }
@@ -250,24 +251,46 @@ export function AdminPanel() {
           <label className="text-sm text-kiosk-muted">
             New Tablet Pairing PIN (optional)
             <input
-              className={`${field} mt-1`}
+              className={`${field} mt-1 ${pairingPinManaged ? "opacity-60 cursor-not-allowed" : ""}`}
               type="password"
               inputMode="numeric"
-              placeholder={pairingPinSet ? "Leave blank to keep current" : "Not set"}
+              disabled={pairingPinManaged}
+              placeholder={
+                pairingPinManaged
+                  ? "Managed by the station's deployment"
+                  : pairingPinSet
+                    ? "Leave blank to keep current"
+                    : "Not set"
+              }
               value={pairingPin}
               onChange={(e) => setPairingPin(e.target.value)}
             />
+            {pairingPinManaged && (
+              <span className="mt-1 block text-xs text-kiosk-muted">
+                Managed by the station's deployment
+              </span>
+            )}
           </label>
           <label className="text-sm text-kiosk-muted">
             New Admin PIN (optional)
             <input
-              className={`${field} mt-1`}
+              className={`${field} mt-1 ${adminPasswordManaged ? "opacity-60 cursor-not-allowed" : ""}`}
               type="password"
               inputMode="numeric"
-              placeholder="Leave blank to keep current"
+              disabled={adminPasswordManaged}
+              placeholder={
+                adminPasswordManaged
+                  ? "Managed by the station's deployment"
+                  : "Leave blank to keep current"
+              }
               value={newAdminPassword}
               onChange={(e) => setNewAdminPassword(e.target.value)}
             />
+            {adminPasswordManaged && (
+              <span className="mt-1 block text-xs text-kiosk-muted">
+                Managed by the station's deployment
+              </span>
+            )}
           </label>
         </div>
 

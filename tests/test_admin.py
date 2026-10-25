@@ -8,13 +8,14 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from kopi.config import KopiSettings, load_settings, save_settings
 from kopi.hardware import reset_bridges
-from kopi.main import create_app
+from kopi.main import _cli_setup_sheet, _cli_status, create_app
 
 
 @pytest.fixture
 def app(temp_settings_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
-    _ = temp_settings_path
+    save_settings(KopiSettings(admin_password="1234", pairing_pin="0000"), temp_settings_path)
     monkeypatch.setenv("KOPI_HARDWARE_MODE", "mock")
     reset_bridges()
     return create_app()
@@ -201,3 +202,108 @@ async def test_cors_defaults_to_station_origin_not_wildcard(
         )
         assert own.status_code == 200
         assert own.headers.get("access-control-allow-origin") == "http://localhost:8000"
+
+
+@pytest.mark.asyncio
+async def test_admin_settings_managed_credentials_rejected_on_put(
+    temp_settings_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    save_settings(KopiSettings(admin_password="stored-admin", pairing_pin="stored-pin"), temp_settings_path)
+    monkeypatch.setenv("KOPI_HARDWARE_MODE", "mock")
+    monkeypatch.setenv("KOPI_ADMIN_PASSWORD", "managed-admin-12345678")
+    monkeypatch.setenv("KOPI_PAIRING_PIN", "654321")
+    reset_bridges()
+    managed_app = create_app()
+
+    async with AsyncClient(transport=ASGITransport(app=managed_app), base_url="http://test") as client:
+        res_get = await client.get(
+            "/api/admin/settings",
+            headers={"X-Admin-Password": "managed-admin-12345678"},
+        )
+        assert res_get.status_code == 200
+        body = res_get.json()
+        assert body["admin_password_managed"] is True
+        assert body["pairing_pin_managed"] is True
+        assert "admin_password" not in body
+        assert "pairing_pin" not in body
+
+        # Attempting to change a managed pairing PIN -> 400
+        res_pin_change = await client.put(
+            "/api/admin/settings",
+            headers={"X-Admin-Password": "managed-admin-12345678"},
+            json={"pairing_pin": "999999"},
+        )
+        assert res_pin_change.status_code == 400
+
+        # Attempting to change a managed admin password -> 400
+        res_pw_change = await client.put(
+            "/api/admin/settings",
+            headers={"X-Admin-Password": "managed-admin-12345678"},
+            json={"new_admin_password": "different-admin-pw"},
+        )
+        assert res_pw_change.status_code == 400
+
+        # Passing the same value or omitting managed fields succeeds without writing overrides to disk
+        res_same = await client.put(
+            "/api/admin/settings",
+            headers={"X-Admin-Password": "managed-admin-12345678"},
+            json={
+                "pairing_pin": "654321",
+                "new_admin_password": "managed-admin-12345678",
+                "scanner_device": "mock:scanner",
+            },
+        )
+        assert res_same.status_code == 200
+
+    # Verify stored file still has original secrets when overrides are removed
+    monkeypatch.delenv("KOPI_ADMIN_PASSWORD")
+    monkeypatch.delenv("KOPI_PAIRING_PIN")
+    reloaded = load_settings(temp_settings_path)
+    assert reloaded.admin_password == "stored-admin"
+    assert reloaded.pairing_pin == "stored-pin"
+
+
+def test_cli_status_hides_secrets_by_default_and_shows_with_flag(
+    temp_settings_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    save_settings(KopiSettings(admin_password="87654321", pairing_pin="135790"), temp_settings_path)
+    _cli_status()
+    out_default = capsys.readouterr().out
+    assert "135790" not in out_default
+    assert "87654321" not in out_default
+    assert "--show-secrets" in out_default
+
+    monkeypatch.setenv("KOPI_PAIRING_PIN", "246810")
+    _cli_status(show_secrets=True)
+    out_secrets = capsys.readouterr().out
+    assert "246810 (managed externally)" in out_secrets
+    assert "87654321" in out_secrets
+
+
+@pytest.mark.asyncio
+async def test_public_url_in_setup_sheet_and_cors(
+    temp_settings_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    save_settings(KopiSettings(admin_password="87654321", pairing_pin="135790"), temp_settings_path)
+    monkeypatch.setenv("KOPI_HARDWARE_MODE", "mock")
+    monkeypatch.setenv("KOPI_PUBLIC_URL", "https://copier.example.org:8443/")
+
+    _cli_setup_sheet()
+    sheet_out = capsys.readouterr().out
+    assert "Station URL : https://copier.example.org:8443" in sheet_out
+    assert "Pairing PIN : 135790" in sheet_out
+
+    public_app = create_app()
+    async with AsyncClient(transport=ASGITransport(app=public_app), base_url="http://test") as client:
+        res = await client.get(
+            "/api/health", headers={"Origin": "https://copier.example.org:8443"}
+        )
+        assert res.status_code == 200
+        assert (
+            res.headers.get("access-control-allow-origin")
+            == "https://copier.example.org:8443"
+        )

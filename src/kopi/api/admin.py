@@ -10,7 +10,15 @@ from pydantic import BaseModel, Field
 
 from kopi.auth.pairing import get_pairing_provider
 from kopi.auth.rate_limit import get_auth_rate_limiter
-from kopi.config import SmtpConfig, load_settings, save_settings, verify_admin_password
+from kopi.config import (
+    SmtpConfig,
+    is_admin_password_managed,
+    is_pairing_pin_managed,
+    load_settings,
+    save_settings,
+    verify_admin_password,
+    verify_pairing_pin,
+)
 from kopi.hardware import (
     get_hardware_lock,
     list_printer_queues_async,
@@ -78,6 +86,8 @@ async def api_admin_settings(
         "printer_device": settings.printer_device,
         "id_scan_ocr": settings.id_scan_ocr,
         "pairing_pin_set": bool(settings.pairing_pin),
+        "pairing_pin_managed": is_pairing_pin_managed(),
+        "admin_password_managed": is_admin_password_managed(),
         "paired_device_id": settings.paired_device_id,
         "paired_device_label": settings.paired_device_label,
         "paired_at": settings.paired_at,
@@ -103,9 +113,25 @@ async def api_admin_settings_put(
     settings.printer_device = body.printer_device.strip()
     settings.id_scan_ocr = bool(body.id_scan_ocr)
     if body.pairing_pin is not None and body.pairing_pin.strip():
-        settings.pairing_pin = body.pairing_pin.strip()
+        candidate_pin = body.pairing_pin.strip()
+        if is_pairing_pin_managed():
+            if not verify_pairing_pin(settings, candidate_pin):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Pairing PIN is managed externally and cannot be changed.",
+                )
+        else:
+            settings.pairing_pin = candidate_pin
     if body.new_admin_password is not None and body.new_admin_password.strip():
-        settings.admin_password = body.new_admin_password.strip()
+        candidate_pw = body.new_admin_password.strip()
+        if is_admin_password_managed():
+            if not verify_admin_password(settings, candidate_pw):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Admin password is managed externally and cannot be changed.",
+                )
+        else:
+            settings.admin_password = candidate_pw
     save_settings(settings)
     return {"ok": True, "message": "Settings saved"}
 
