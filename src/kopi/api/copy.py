@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import os
 import tempfile
 import time
 import uuid
+from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +37,14 @@ router = APIRouter(prefix="/api", tags=["copy"])
 SCAN_TTL_SEC = int(os.environ.get("KOPI_SCAN_TTL_SEC", "300"))
 
 
+def _unlink_paths(paths: Iterable[str]) -> None:
+    for p in paths:
+        try:
+            Path(p).unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
 class ScanStore:
     """In-memory copy artifact cache with lazy TTL expiry, multi-page batching, and retry restoration."""
 
@@ -48,11 +58,7 @@ class ScanStore:
         dead = [k for k, (exp, _) in self._data.items() if exp <= now]
         for k in dead:
             _exp, paths = self._data.pop(k)
-            for p in paths:
-                try:
-                    Path(p).unlink(missing_ok=True)
-                except OSError:
-                    pass
+            _unlink_paths(paths)
         return len(dead)
 
     async def purge_expired(self) -> int:
@@ -95,11 +101,7 @@ class ScanStore:
             exp, paths = item
             if exp <= time.monotonic():
                 self._data.pop(scan_id, None)
-                for p in paths:
-                    try:
-                        Path(p).unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                _unlink_paths(paths)
                 raise KeyError(scan_id)
             # Refresh TTL on active preview interaction
             self._data[scan_id] = (time.monotonic() + self._ttl_sec, list(paths))
@@ -113,11 +115,7 @@ class ScanStore:
                 raise KeyError(scan_id)
             exp, paths = item
             if exp <= time.monotonic():
-                for p in paths:
-                    try:
-                        Path(p).unlink(missing_ok=True)
-                    except OSError:
-                        pass
+                _unlink_paths(paths)
                 raise KeyError(scan_id)
             return paths
 
@@ -125,15 +123,32 @@ class ScanStore:
         paths = await self.pop_paths(scan_id)
         return paths[0]
 
+    @contextlib.asynccontextmanager
+    async def consume_paths(
+        self,
+        scan_id: str,
+        *,
+        missing_detail: str = "Scan expired or not found. Please scan again.",
+    ) -> AsyncIterator[list[str]]:
+        """Pop cached scan paths, restoring them on any failure/cancellation and unlinking on success."""
+        sid = scan_id.strip()
+        try:
+            page_paths = await self.pop_paths(sid)
+        except KeyError:
+            raise HTTPException(status_code=400, detail=missing_detail) from None
+        try:
+            yield page_paths
+        except BaseException:
+            await self.put_paths(page_paths, scan_id=sid)
+            raise
+        else:
+            _unlink_paths(page_paths)
+
     async def discard(self, scan_id: str) -> None:
         async with self._lock:
             item = self._data.pop(scan_id, None)
         if item is not None:
-            for p in item[1]:
-                try:
-                    Path(p).unlink(missing_ok=True)
-                except OSError:
-                    pass
+            _unlink_paths(item[1])
 
 
 SCAN_STORE = ScanStore(SCAN_TTL_SEC)
@@ -357,71 +372,50 @@ async def api_copy_cancel(scan_id: str | None = None) -> dict[str, Any]:
 @router.post("/print")
 async def api_print(body: PrintBody) -> dict[str, Any]:
     settings = load_settings()
-    try:
-        page_paths = await SCAN_STORE.pop_paths(body.scan_id)
-    except KeyError:
-        raise HTTPException(
-            status_code=400,
-            detail="Scan expired or not found. Please scan again.",
-        ) from None
-
-    temp_combined_pdf: Path | None = None
-    if len(page_paths) == 1:
-        print_target = page_paths[0]
-    else:
-        fd_pdf, pdf_path = tempfile.mkstemp(prefix="kopi-flatbed-multi-", suffix=".pdf")
-        os.close(fd_pdf)
-        temp_combined_pdf = Path(pdf_path)
+    async with SCAN_STORE.consume_paths(body.scan_id) as page_paths:
+        temp_combined_pdf: Path | None = None
         try:
-            pdf_bytes = img2pdf.convert(page_paths)
-            if not pdf_bytes:
+            if len(page_paths) == 1:
+                print_target = page_paths[0]
+            else:
+                fd_pdf, pdf_path = tempfile.mkstemp(prefix="kopi-flatbed-multi-", suffix=".pdf")
+                os.close(fd_pdf)
+                temp_combined_pdf = Path(pdf_path)
+                try:
+                    pdf_bytes = img2pdf.convert(page_paths)
+                    if not pdf_bytes:
+                        raise HTTPException(status_code=400, detail="Failed to assemble multi-page PDF")
+                    temp_combined_pdf.write_bytes(pdf_bytes)
+                    print_target = str(temp_combined_pdf)
+                except HTTPException:
+                    raise
+                except Exception as e:
+                    raise HTTPException(status_code=400, detail=f"PDF assembly error: {e}") from e
+
+            effective_duplex = _resolve_print_duplex(body.duplex, body.page_flip)
+            lock = get_hardware_lock()
+            try:
+                async with lock.acquire("print", wait=False):
+                    result = await get_printer().print_file(
+                        print_target,
+                        copies=body.copies,
+                        duplex=effective_duplex,
+                        color=body.color,
+                        paper_size=body.paper_size,
+                        collate=body.collate,
+                        resize_mode=body.resize_mode,
+                        quality=body.quality,
+                        job_name="kopi-copy",
+                        device=settings.printer_device.strip() or None,
+                    )
+            except HardwareBusyError as e:
+                raise HTTPException(status_code=409, detail=str(e)) from e
+
+            if not result.ok:
+                raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
+        finally:
+            if temp_combined_pdf is not None:
                 temp_combined_pdf.unlink(missing_ok=True)
-                await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
-                raise HTTPException(status_code=400, detail="Failed to assemble multi-page PDF")
-            temp_combined_pdf.write_bytes(pdf_bytes)
-            print_target = str(temp_combined_pdf)
-        except HTTPException:
-            raise
-        except Exception as e:
-            temp_combined_pdf.unlink(missing_ok=True)
-            await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
-            raise HTTPException(status_code=400, detail=f"PDF assembly error: {e}") from e
-
-    effective_duplex = _resolve_print_duplex(body.duplex, body.page_flip)
-    lock = get_hardware_lock()
-    try:
-        async with lock.acquire("print", wait=False):
-            result = await get_printer().print_file(
-                print_target,
-                copies=body.copies,
-                duplex=effective_duplex,
-                color=body.color,
-                paper_size=body.paper_size,
-                collate=body.collate,
-                resize_mode=body.resize_mode,
-                quality=body.quality,
-                job_name="kopi-copy",
-                device=settings.printer_device.strip() or None,
-            )
-    except HardwareBusyError as e:
-        await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
-        raise HTTPException(status_code=409, detail=str(e)) from e
-    except BaseException:
-        await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
-        raise
-    finally:
-        if temp_combined_pdf is not None:
-            temp_combined_pdf.unlink(missing_ok=True)
-
-    if not result.ok:
-        await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
-        raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
-
-    for p in page_paths:
-        try:
-            Path(p).unlink(missing_ok=True)
-        except OSError:
-            pass
 
     message = f"Print job submitted ({body.copies} {'copy' if body.copies == 1 else 'copies'})"
     if result.job_id:

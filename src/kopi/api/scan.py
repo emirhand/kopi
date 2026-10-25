@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import os
 import re
 import tempfile
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
@@ -236,14 +238,6 @@ def _assemble_cached_pages_to_payloads(
     return _encode_pil_images(pil_images, fmt_norm=fmt_norm)
 
 
-def _cleanup_cached_paths(page_paths: list[str]) -> None:
-    for p in page_paths:
-        try:
-            Path(p).unlink(missing_ok=True)
-        except OSError:
-            pass
-
-
 def _finalize_scan_bytes(
     raw: bytes,
     *,
@@ -302,6 +296,7 @@ def _convert_direct_scan_bytes(
     return _encode_pil_images(images, fmt_norm=fmt_norm)
 
 
+@contextlib.asynccontextmanager
 async def _acquire_or_assemble_scan(
     *,
     operation_name: str,
@@ -313,26 +308,20 @@ async def _acquire_or_assemble_scan(
     output_format: ScanOutputFormat,
     fmt_norm: str,
     remove_blank_pages: bool,
-) -> tuple[list[bytes], list[str]]:
+) -> AsyncIterator[list[bytes]]:
     """Either assemble a cached multi-step/preview scan_id or run a direct hardware scan."""
     if scan_id and scan_id.strip():
-        try:
-            page_paths = await SCAN_STORE.pop_paths(scan_id.strip())
-        except KeyError:
-            raise HTTPException(
-                status_code=400,
-                detail="Scanned pages expired or not found. Please scan again.",
-            ) from None
-        try:
+        async with SCAN_STORE.consume_paths(
+            scan_id.strip(),
+            missing_detail="Scanned pages expired or not found. Please scan again.",
+        ) as page_paths:
             payloads = _assemble_cached_pages_to_payloads(
                 page_paths,
                 fmt_norm=fmt_norm,
                 remove_blank_pages=remove_blank_pages,
             )
-            return payloads, page_paths
-        except Exception:
-            await SCAN_STORE.put_paths(page_paths, scan_id=scan_id.strip())
-            raise
+            yield payloads
+        return
 
     settings = load_settings()
     # Direct hardware scan uses "pdf" for multi-page/PNG/TIFF or "jpg" for single-page JPEG
@@ -363,7 +352,7 @@ async def _acquire_or_assemble_scan(
         fmt_norm=fmt_norm,
         remove_blank_pages=remove_blank_pages,
     )
-    return payloads, []
+    yield payloads
 
 
 class ScanEmailBody(BaseModel):
@@ -417,7 +406,7 @@ async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
     dpi = _dpi_from_resolution_label(body.resolution)
     fmt_norm = _normalize_scan_format(body.output_format)
 
-    payloads, page_paths = await _acquire_or_assemble_scan(
+    async with _acquire_or_assemble_scan(
         operation_name="scan-email",
         scan_id=body.scan_id,
         duplex=body.duplex,
@@ -427,42 +416,38 @@ async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
         output_format=body.output_format,
         fmt_norm=fmt_norm,
         remove_blank_pages=body.remove_blank_pages,
-    )
-
-    filenames = _resolve_numbered_scan_filenames(
-        body.filename,
-        page_count=len(payloads),
-        fmt_norm=fmt_norm,
-        for_email=True,
-    )
-    default_subject = (
-        f"Scan: {filenames[0]} ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)"
-    )
-    subject = (body.subject or "").strip() or default_subject
-    email_body = (body.body or "").strip() or None
-    if len(payloads) == 1:
-        ok, err = mailer.send_attachment_email(
-            payloads[0],
-            filename=filenames[0],
-            to_addr=body.recipient.strip(),
-            subject=subject,
-            body=email_body,
-            smtp=settings.smtp,
+    ) as payloads:
+        filenames = _resolve_numbered_scan_filenames(
+            body.filename,
+            page_count=len(payloads),
+            fmt_norm=fmt_norm,
+            for_email=True,
         )
-    else:
-        ok, err = mailer.send_attachments_email(
-            list(zip(filenames, payloads, strict=True)),
-            to_addr=body.recipient.strip(),
-            subject=subject,
-            body=email_body,
-            smtp=settings.smtp,
+        default_subject = (
+            f"Scan: {filenames[0]} ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)"
         )
-    if not ok:
-        if page_paths and body.scan_id:
-            await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
-        raise HTTPException(status_code=400, detail=err or "Failed to send email")
+        subject = (body.subject or "").strip() or default_subject
+        email_body = (body.body or "").strip() or None
+        if len(payloads) == 1:
+            ok, err = mailer.send_attachment_email(
+                payloads[0],
+                filename=filenames[0],
+                to_addr=body.recipient.strip(),
+                subject=subject,
+                body=email_body,
+                smtp=settings.smtp,
+            )
+        else:
+            ok, err = mailer.send_attachments_email(
+                list(zip(filenames, payloads, strict=True)),
+                to_addr=body.recipient.strip(),
+                subject=subject,
+                body=email_body,
+                smtp=settings.smtp,
+            )
+        if not ok:
+            raise HTTPException(status_code=400, detail=err or "Failed to send email")
 
-    _cleanup_cached_paths(page_paths)
     return {
         "ok": True,
         "filename": filenames[0],
@@ -487,7 +472,7 @@ async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)) ->
     dpi = _dpi_from_resolution_label(body.resolution)
     fmt_norm = _normalize_scan_format(body.output_format)
 
-    payloads, page_paths = await _acquire_or_assemble_scan(
+    async with _acquire_or_assemble_scan(
         operation_name="scan-usb",
         scan_id=body.scan_id,
         duplex=body.duplex,
@@ -497,29 +482,25 @@ async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)) ->
         output_format=body.output_format,
         fmt_norm=fmt_norm,
         remove_blank_pages=body.remove_blank_pages,
-    )
+    ) as payloads:
+        filenames = _resolve_numbered_scan_filenames(
+            body.filename,
+            page_count=len(payloads),
+            fmt_norm=fmt_norm,
+            target_dir=mount,
+        )
+        saved_paths: list[Path] = []
+        try:
+            for name, data in zip(filenames, payloads, strict=True):
+                dest = mount / name
+                with dest.open("wb") as f:
+                    f.write(data)
+                    f.flush()
+                    os.fsync(f.fileno())
+                saved_paths.append(dest)
+        except OSError as e:
+            raise HTTPException(status_code=400, detail=f"Could not write to USB: {e}") from e
 
-    filenames = _resolve_numbered_scan_filenames(
-        body.filename,
-        page_count=len(payloads),
-        fmt_norm=fmt_norm,
-        target_dir=mount,
-    )
-    saved_paths: list[Path] = []
-    try:
-        for name, data in zip(filenames, payloads, strict=True):
-            dest = mount / name
-            with dest.open("wb") as f:
-                f.write(data)
-                f.flush()
-                os.fsync(f.fileno())
-            saved_paths.append(dest)
-    except OSError as e:
-        if page_paths and body.scan_id:
-            await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
-        raise HTTPException(status_code=400, detail=f"Could not write to USB: {e}") from e
-
-    _cleanup_cached_paths(page_paths)
     msg = (
         f"Saved to {saved_paths[0]}"
         if len(saved_paths) == 1
@@ -538,7 +519,7 @@ async def api_scan_archive(body: ScanArchiveBody) -> dict[str, Any]:
     dpi = _dpi_from_resolution_label(body.resolution)
     fmt_norm = _normalize_scan_format(body.output_format)
 
-    payloads, page_paths = await _acquire_or_assemble_scan(
+    async with _acquire_or_assemble_scan(
         operation_name="scan-archive",
         scan_id=body.scan_id,
         duplex=body.duplex,
@@ -548,28 +529,24 @@ async def api_scan_archive(body: ScanArchiveBody) -> dict[str, Any]:
         output_format=body.output_format,
         fmt_norm=fmt_norm,
         remove_blank_pages=body.remove_blank_pages,
-    )
+    ) as payloads:
+        archive_dir = _get_archive_dir()
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        filenames = _resolve_numbered_scan_filenames(
+            body.filename,
+            page_count=len(payloads),
+            fmt_norm=fmt_norm,
+            target_dir=archive_dir,
+        )
+        saved_paths: list[Path] = []
+        try:
+            for name, data in zip(filenames, payloads, strict=True):
+                dest = archive_dir / name
+                dest.write_bytes(data)
+                saved_paths.append(dest)
+        except OSError as e:
+            raise HTTPException(status_code=400, detail=f"Could not write archive file: {e}") from e
 
-    archive_dir = _get_archive_dir()
-    archive_dir.mkdir(parents=True, exist_ok=True)
-    filenames = _resolve_numbered_scan_filenames(
-        body.filename,
-        page_count=len(payloads),
-        fmt_norm=fmt_norm,
-        target_dir=archive_dir,
-    )
-    saved_paths: list[Path] = []
-    try:
-        for name, data in zip(filenames, payloads, strict=True):
-            dest = archive_dir / name
-            dest.write_bytes(data)
-            saved_paths.append(dest)
-    except OSError as e:
-        if page_paths and body.scan_id:
-            await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
-        raise HTTPException(status_code=400, detail=f"Could not write archive file: {e}") from e
-
-    _cleanup_cached_paths(page_paths)
     msg = (
         f"Saved to {saved_paths[0]}"
         if len(saved_paths) == 1
