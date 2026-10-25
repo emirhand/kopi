@@ -26,18 +26,26 @@ def _mime_type_for_filename(filename: str) -> tuple[str, str]:
     return "application", "pdf"
 
 
+DEFAULT_EMAIL_BODY = "Attached is your scanned document from Kopi."
+
+
+def _sanitize_header_text(val: str) -> str:
+    return " ".join((val or "").splitlines()).strip()
+
+
 def send_attachments_email(
     attachments: list[tuple[str, bytes]],
     *,
     to_addr: str,
     subject: str,
+    body: str | None = None,
     smtp: SmtpConfig | dict[str, Any],
     timeout_sec: int = 30,
 ) -> tuple[bool, str | None]:
     """Send one or more scanned document/image attachments via SMTP."""
     cfg = _coerce_smtp_config(smtp)
     host = cfg.host.strip()
-    recipient = (to_addr or "").strip()
+    recipient = _sanitize_header_text(to_addr)
     if not recipient or "@" not in recipient:
         return False, "Valid recipient email address is required"
     if not host:
@@ -45,12 +53,15 @@ def send_attachments_email(
     if not attachments:
         return False, "No attachments to send"
 
-    sender = (cfg.from_email or cfg.user or "kopi@localhost").strip()
+    sender = _sanitize_header_text(cfg.from_email or cfg.user or "kopi@localhost")
+    clean_subject = _sanitize_header_text(subject) or "Scanned document from Kopi"
+    body_text = (body or "").strip() or DEFAULT_EMAIL_BODY
+
     msg = EmailMessage()
     msg["From"] = sender
     msg["To"] = recipient
-    msg["Subject"] = subject
-    msg.set_content("Attached is your scanned document from Kopi.")
+    msg["Subject"] = clean_subject
+    msg.set_content(body_text)
 
     for filename, payload in attachments:
         maintype, subtype = _mime_type_for_filename(filename)
@@ -81,6 +92,7 @@ def send_attachment_email(
     filename: str,
     to_addr: str,
     subject: str,
+    body: str | None = None,
     smtp: SmtpConfig | dict[str, Any],
     timeout_sec: int = 30,
 ) -> tuple[bool, str | None]:
@@ -89,6 +101,7 @@ def send_attachment_email(
         [(filename, payload)],
         to_addr=to_addr,
         subject=subject,
+        body=body,
         smtp=smtp,
         timeout_sec=timeout_sec,
     )
@@ -99,6 +112,7 @@ def send_pdf_email(
     *,
     to_addr: str,
     subject: str,
+    body: str | None = None,
     smtp: SmtpConfig | dict[str, Any],
     filename: str = "id-scan.pdf",
 ) -> tuple[bool, str | None]:
@@ -108,5 +122,6 @@ def send_pdf_email(
         filename=filename,
         to_addr=to_addr,
         subject=subject,
+        body=body,
         smtp=smtp,
     )

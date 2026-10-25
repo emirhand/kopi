@@ -21,6 +21,8 @@ export function IdScanWizard() {
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
   const [ocrHint, setOcrHint] = useState(false);
   const [email, setEmail] = useState("");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
   const [modal, setModal] = useState<{ title: string; message: string; variant: "info" | "error" } | null>(null);
 
   useEffect(() => {
@@ -158,7 +160,12 @@ export function IdScanWizard() {
       const res = await fetch(apiUrl("/api/id-scan/email"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, recipient: email.trim() }),
+        body: JSON.stringify({
+          session_id: sessionId,
+          recipient: email.trim(),
+          subject: emailSubject.trim() || null,
+          body: emailBody.trim() || null,
+        }),
       });
       if (!res.ok) {
         setModal({ title: "Email", message: await parseErrorDetail(res), variant: "error" });
@@ -305,18 +312,38 @@ export function IdScanWizard() {
               {busy === "print" ? "…" : "Print"}
             </KioskButton>
             <div className="flex min-h-[5rem] flex-col gap-2 md:col-span-2">
-              <input
-                type="email"
-                inputMode="email"
-                placeholder="Email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                disabled={hardwareBusy}
-                className="min-h-11 w-full rounded-2xl border-2 border-kiosk-industrial-border bg-kiosk-industrial-navy px-3 text-zinc-100 placeholder:text-zinc-500"
-              />
-              <KioskButton variant="secondary" className="min-h-11 w-full text-base" disabled={hardwareBusy} onClick={doEmail}>
-                {busy === "email" ? "…" : "Email"}
-              </KioskButton>
+              <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                <input
+                  type="email"
+                  inputMode="email"
+                  placeholder="Recipient email"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  disabled={hardwareBusy}
+                  className="min-h-11 w-full rounded-2xl border-2 border-kiosk-industrial-border bg-kiosk-industrial-navy px-3 text-sm text-zinc-100 placeholder:text-zinc-500"
+                />
+                <input
+                  type="text"
+                  placeholder="Subject (optional)"
+                  value={emailSubject}
+                  onChange={(e) => setEmailSubject(e.target.value)}
+                  disabled={hardwareBusy}
+                  className="min-h-11 w-full rounded-2xl border-2 border-kiosk-industrial-border bg-kiosk-industrial-navy px-3 text-sm text-zinc-100 placeholder:text-zinc-500"
+                />
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Message body (optional)"
+                  value={emailBody}
+                  onChange={(e) => setEmailBody(e.target.value)}
+                  disabled={hardwareBusy}
+                  className="min-h-11 flex-1 rounded-2xl border-2 border-kiosk-industrial-border bg-kiosk-industrial-navy px-3 text-sm text-zinc-100 placeholder:text-zinc-500"
+                />
+                <KioskButton variant="secondary" className="min-h-11 shrink-0 px-5 text-base" disabled={hardwareBusy} onClick={doEmail}>
+                  {busy === "email" ? "…" : "Email"}
+                </KioskButton>
+              </div>
             </div>
             <KioskButton
               layout="tile"

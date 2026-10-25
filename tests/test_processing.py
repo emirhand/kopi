@@ -94,7 +94,7 @@ def test_mailer_validation_and_mock_smtp(monkeypatch: pytest.MonkeyPatch) -> Non
     assert ok is False
     assert err is not None and "SMTP" in err
 
-    sent_messages: list[object] = []
+    sent_messages: list[EmailMessage] = []
 
     class DummySMTP:
         def __init__(self, host: str, port: int, timeout: int = 30) -> None:
@@ -117,10 +117,11 @@ def test_mailer_validation_and_mock_smtp(monkeypatch: pytest.MonkeyPatch) -> Non
         def login(self, user: str, password: str) -> None:
             _ = user, password
 
-        def send_message(self, msg: object) -> None:
+        def send_message(self, msg: EmailMessage) -> None:
             sent_messages.append(msg)
 
     import smtplib
+    from email.message import EmailMessage
 
     monkeypatch.setattr(smtplib, "SMTP", DummySMTP)
 
@@ -136,9 +137,12 @@ def test_mailer_validation_and_mock_smtp(monkeypatch: pytest.MonkeyPatch) -> Non
         b"%PDF-1.4 mock",
         filename="scan.pdf",
         to_addr="dest@example.com",
-        subject="Scan Ready",
+        subject="Custom Subject",
+        body="Here is the requested contract.",
         smtp=valid_smtp,
     )
     assert ok2 is True
     assert err2 is None
     assert len(sent_messages) == 1
+    assert sent_messages[0]["Subject"] == "Custom Subject"
+    assert "Here is the requested contract." in sent_messages[0].get_body().get_content()  # type: ignore[union-attr]

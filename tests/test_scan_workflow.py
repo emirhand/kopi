@@ -366,6 +366,8 @@ async def test_scan_custom_filename_email_usb_and_archive(
     monkeypatch.setenv("KOPI_ARCHIVE_DIR", str(archive_dir))
 
     captured_filenames: list[str] = []
+    captured_subjects: list[str] = []
+    captured_bodies: list[str | None] = []
     import kopi.processing.mailer as mailer_mod
 
     def fake_send_attachment_email(
@@ -374,26 +376,33 @@ async def test_scan_custom_filename_email_usb_and_archive(
         filename: str,
         to_addr: str,
         subject: str,
+        body: str | None = None,
         smtp: object,
     ) -> tuple[bool, str | None]:
-        _ = (to_addr, subject, smtp)
+        _ = (to_addr, smtp)
         captured_filenames.append(filename)
+        captured_subjects.append(subject)
+        captured_bodies.append(body)
         return True, None
 
     monkeypatch.setattr(mailer_mod, "send_attachment_email", fake_send_attachment_email)
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        # 1. Custom filename in Scan to Email (even if user typed .pdf or path chars)
+        # 1. Custom filename, subject, and body in Scan to Email
         email_res = await client.post(
             "/api/scan/email",
             json={
                 "recipient": "user@example.com",
+                "subject": "Q3 Tax Return",
+                "body": "Please review the attached scan.",
                 "filename": "../Tax_Return_2026.pdf",
                 "output_format": "pdf",
             },
         )
         assert email_res.status_code == 200
         assert captured_filenames == ["Tax_Return_2026.pdf"]
+        assert captured_subjects == ["Q3 Tax Return"]
+        assert captured_bodies == ["Please review the attached scan."]
 
         # 2. Custom filename in Scan to USB + duplicate collision prevention
         usb_res1 = await client.post(

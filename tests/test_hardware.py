@@ -92,6 +92,34 @@ def test_build_scanimage_document_cmd_explicit_source() -> None:
     assert ["--source", "ADF"] == cmd[cmd.index("--source") : cmd.index("--source") + 2]
 
 
+def test_build_scanimage_cmds_apply_original_size_geometry() -> None:
+    from kopi.hardware.scanner import build_scanimage_batch_cmd
+
+    cmd_doc = build_scanimage_document_cmd(
+        duplex_scan=False,
+        source=ScanSource.FLATBED,
+        output_format="png",
+        resolution_dpi=300,
+        color=True,
+        original_size="A5",
+    )
+    assert ["-l", "0", "-t", "0", "-x", "148", "-y", "210"] == cmd_doc[
+        cmd_doc.index("-l") : cmd_doc.index("-l") + 8
+    ]
+
+    cmd_batch = build_scanimage_batch_cmd(
+        batch_pattern="/tmp/batch/page-%04d.png",
+        duplex_scan=False,
+        source=ScanSource.ADF,
+        resolution_dpi=300,
+        color=True,
+        original_size="Letter",
+    )
+    assert ["-l", "0", "-t", "0", "-x", "215.9", "-y", "279.4"] == cmd_batch[
+        cmd_batch.index("-l") : cmd_batch.index("-l") + 8
+    ]
+
+
 def test_build_lp_cmd_full_copier_options() -> None:
     cmd = build_lp_cmd(
         "/tmp/doc.pdf",
@@ -145,6 +173,18 @@ async def test_mock_scanner_and_printer_bridges_work_without_external_binaries(
     assert file_res.ok is True
     p = Path(file_res.path)
     assert p.is_file() and p.stat().st_size > 0
+
+    file_4x6 = await scanner.scan_copy_file(
+        duplex=False, resolution_dpi=300, color=True, original_size="4x6"
+    )
+    assert file_4x6.ok is True
+    p_4x6 = Path(file_4x6.path)
+    from PIL import Image
+
+    with Image.open(p) as im_a4, Image.open(p_4x6) as im_4x6:
+        assert im_4x6.size[0] < im_a4.size[0]
+        assert im_4x6.size[1] < im_a4.size[1]
+    p_4x6.unlink(missing_ok=True)
 
     print_res = await printer.print_file(
         str(p),

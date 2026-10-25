@@ -41,7 +41,6 @@ def test_save_and_load_settings_roundtrip(temp_settings_path: Path) -> None:
         paired_device_token_hash="abc123hash",
         scanner_device="pixma:04A9176D",
         printer_device="Canon_LBP",
-        usb_roots=["/media/usb0"],
         id_scan_ocr=True,
         smtp=SmtpConfig(
             host="smtp.example.com",

@@ -78,6 +78,25 @@ def _is_adf_source(duplex_scan: bool, source: ScanSource | None) -> bool:
     return _resolve_sane_source(duplex_scan, source) in ("ADF", "ADF Duplex")
 
 
+_ORIGINAL_SIZE_MM: Final[dict[str, tuple[float, float]]] = {
+    "a4": (210.0, 297.0),
+    "letter": (215.9, 279.4),
+    "legal": (215.9, 355.6),
+    "a5": (148.0, 210.0),
+    "4x6": (101.6, 152.4),
+}
+
+
+def resolve_original_size_mm(original_size: str | None) -> tuple[float, float]:
+    """Return physical `(width_mm, height_mm)` for a paper size name (defaults to A4)."""
+    key = (original_size or "A4").strip().lower()
+    return _ORIGINAL_SIZE_MM.get(key, _ORIGINAL_SIZE_MM["a4"])
+
+
+def _format_mm(val: float) -> str:
+    return f"{val:g}"
+
+
 def build_scanimage_document_cmd(
     *,
     duplex_scan: bool = False,
@@ -86,6 +105,7 @@ def build_scanimage_document_cmd(
     output_format: str = "pdf",
     resolution_dpi: int = 300,
     color: bool = True,
+    original_size: str | None = None,
     include_resolution: bool = True,
     include_mode: bool = True,
     output_path: str = "-",
@@ -113,6 +133,10 @@ def build_scanimage_document_cmd(
 
     cmd.extend(["--source", _resolve_sane_source(duplex_scan, source)])
 
+    if original_size and original_size.strip():
+        w_mm, h_mm = resolve_original_size_mm(original_size)
+        cmd.extend(["-l", "0", "-t", "0", "-x", _format_mm(w_mm), "-y", _format_mm(h_mm)])
+
     extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
     if extra:
         cmd.extend(extra.split())
@@ -129,6 +153,7 @@ def build_scanimage_batch_cmd(
     device: str | None = None,
     resolution_dpi: int = 300,
     color: bool = True,
+    original_size: str | None = None,
     include_resolution: bool = True,
     include_mode: bool = True,
 ) -> list[str]:
@@ -146,6 +171,10 @@ def build_scanimage_batch_cmd(
         cmd.extend(["-d", dev])
 
     cmd.extend(["--source", _resolve_sane_source(duplex_scan, source)])
+
+    if original_size and original_size.strip():
+        w_mm, h_mm = resolve_original_size_mm(original_size)
+        cmd.extend(["-l", "0", "-t", "0", "-x", _format_mm(w_mm), "-y", _format_mm(h_mm)])
 
     extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
     if extra:
@@ -490,7 +519,6 @@ class RealScannerBridge(ScannerBridge):
         resize_percent: int = 100,
         timeout_sec: int = 300,
     ) -> ScanFileResult:
-        _ = original_size
         self._cancel_requested = False
 
         async def exec_once(run_cmd: list[str]) -> tuple[int, str]:
@@ -527,6 +555,7 @@ class RealScannerBridge(ScannerBridge):
                     device=device,
                     resolution_dpi=resolution_dpi,
                     color=color,
+                    original_size=original_size,
                 )
                 log.info("scan_adf_batch_start mode=real cmd=%s", " ".join(cmd))
 
@@ -620,6 +649,7 @@ class RealScannerBridge(ScannerBridge):
             output_format="png",
             resolution_dpi=resolution_dpi,
             color=color,
+            original_size=original_size,
             output_path=file_path,
         )
 
@@ -810,7 +840,7 @@ class MockScannerBridge(ScannerBridge):
         resize_percent: int = 100,
         timeout_sec: int = 300,
     ) -> ScanFileResult:
-        _ = duplex, source, device, resolution_dpi, original_size, timeout_sec
+        _ = duplex, source, device, resolution_dpi, timeout_sec
         self._cancel_requested = False
         await asyncio.sleep(_mock_delay(0.2))
         if self._cancel_requested:
@@ -819,9 +849,16 @@ class MockScannerBridge(ScannerBridge):
         os.close(fd)
         mode = "RGB" if color else "L"
         bg = (255, 255, 255) if color else 255
-        img = Image.new(mode, (600, 848), color=bg)
+        w_mm, h_mm = resolve_original_size_mm(original_size)
+        mock_px_w = max(100, round(w_mm * (600.0 / 210.0)))
+        mock_px_h = max(100, round(h_mm * (600.0 / 210.0)))
+        img = Image.new(mode, (mock_px_w, mock_px_h), color=bg)
         draw = ImageDraw.Draw(img)
-        draw.text((40, 60), "MOCK COPY PAGE", fill=(10, 10, 10) if color else 10)
+        draw.text(
+            (40, 60),
+            f"MOCK COPY PAGE ({original_size})",
+            fill=(10, 10, 10) if color else 10,
+        )
         img.save(file_path, format="PNG")
         enhance_scanned_image_file(
             Path(file_path),

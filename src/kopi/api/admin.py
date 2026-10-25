@@ -24,7 +24,6 @@ class AdminSettingsUpdate(BaseModel):
     smtp: SmtpConfig = Field(default_factory=SmtpConfig)
     scanner_device: str = ""
     printer_device: str = ""
-    usb_roots: list[str] = Field(default_factory=list)
     id_scan_ocr: bool = False
     pairing_pin: str | None = None
     new_admin_password: str | None = None
@@ -67,7 +66,6 @@ async def api_admin_settings(
         "smtp": smtp_data,
         "scanner_device": settings.scanner_device,
         "printer_device": settings.printer_device,
-        "usb_roots": settings.usb_roots,
         "id_scan_ocr": settings.id_scan_ocr,
         "pairing_pin_set": bool(settings.pairing_pin),
         "paired_device_id": settings.paired_device_id,
@@ -93,7 +91,6 @@ async def api_admin_settings_put(
         settings.smtp.password = existing_smtp_password
     settings.scanner_device = body.scanner_device.strip()
     settings.printer_device = body.printer_device.strip()
-    settings.usb_roots = [x.strip() for x in body.usb_roots if x.strip()]
     settings.id_scan_ocr = bool(body.id_scan_ocr)
     if body.pairing_pin is not None and body.pairing_pin.strip():
         settings.pairing_pin = body.pairing_pin.strip()

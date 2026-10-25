@@ -68,7 +68,6 @@ async def test_admin_verify_and_settings_crud(app: FastAPI) -> None:
             },
             "scanner_device": "hpaio:/usb/HP_OfficeJet_Pro_9010_series?serial=TH0B2762P5",
             "printer_device": "HP_OfficeJet_Pro_9010",
-            "usb_roots": ["/run/media"],
             "id_scan_ocr": True,
         }
         res_put = await client.put(

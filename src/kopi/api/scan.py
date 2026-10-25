@@ -210,7 +210,6 @@ def _assemble_cached_pages_to_payloads(
     *,
     fmt_norm: str,
     remove_blank_pages: bool,
-    dpi: int,
 ) -> list[bytes]:
     """Convert cached page file(s) into 1 or more output file payloads."""
     if not page_paths:
@@ -229,7 +228,6 @@ def _assemble_cached_pages_to_payloads(
                 raw_pdf,
                 fmt_norm="pdf",
                 remove_blank_pages=remove_blank_pages,
-                dpi=dpi,
             )
         ]
 
@@ -250,7 +248,6 @@ def _finalize_scan_bytes(
     *,
     fmt_norm: str,
     remove_blank_pages: bool,
-    dpi: int,
 ) -> bytes:
     if fmt_norm != "pdf" or not remove_blank_pages:
         return raw
@@ -262,7 +259,7 @@ def _finalize_scan_bytes(
     p_out = Path(path_out)
     try:
         p_in.write_bytes(raw)
-        ok, err = remove_blank_pages_from_pdf(p_in, p_out, density=min(dpi, 300))
+        ok, err = remove_blank_pages_from_pdf(p_in, p_out)
         if not ok:
             raise HTTPException(status_code=400, detail=err or "Blank page removal failed")
         return p_out.read_bytes()
@@ -277,7 +274,6 @@ def _convert_direct_scan_bytes(
     scanner_fmt: Literal["pdf", "jpg", "jpeg"],
     fmt_norm: str,
     remove_blank_pages: bool,
-    dpi: int,
 ) -> list[bytes]:
     """Convert direct scan_pdf bytes into the requested target format(s)."""
     if fmt_norm == "pdf":
@@ -286,7 +282,6 @@ def _convert_direct_scan_bytes(
                 raw_bytes,
                 fmt_norm="pdf",
                 remove_blank_pages=remove_blank_pages,
-                dpi=dpi,
             )
         ]
     if fmt_norm == "jpeg" and scanner_fmt in ("jpg", "jpeg"):
@@ -332,7 +327,6 @@ async def _acquire_or_assemble_scan(
                 page_paths,
                 fmt_norm=fmt_norm,
                 remove_blank_pages=remove_blank_pages,
-                dpi=dpi,
             )
             return payloads, page_paths
         except Exception:
@@ -367,13 +361,14 @@ async def _acquire_or_assemble_scan(
         scanner_fmt=scanner_fmt,
         fmt_norm=fmt_norm,
         remove_blank_pages=remove_blank_pages,
-        dpi=dpi,
     )
     return payloads, []
 
 
 class ScanEmailBody(BaseModel):
     recipient: str = Field(..., min_length=3)
+    subject: str | None = None
+    body: str | None = None
     filename: str | None = None
     scan_id: str | None = None
     duplex: bool = False
@@ -439,13 +434,18 @@ async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
         fmt_norm=fmt_norm,
         for_email=True,
     )
-    subject = f"Scan: {filenames[0]} ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)"
+    default_subject = (
+        f"Scan: {filenames[0]} ({datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC)"
+    )
+    subject = (body.subject or "").strip() or default_subject
+    email_body = (body.body or "").strip() or None
     if len(payloads) == 1:
         ok, err = mailer.send_attachment_email(
             payloads[0],
             filename=filenames[0],
             to_addr=body.recipient.strip(),
             subject=subject,
+            body=email_body,
             smtp=settings.smtp,
         )
     else:
@@ -453,6 +453,7 @@ async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
             list(zip(filenames, payloads, strict=True)),
             to_addr=body.recipient.strip(),
             subject=subject,
+            body=email_body,
             smtp=settings.smtp,
         )
     if not ok:

@@ -80,6 +80,8 @@ export function ScanMenu() {
 
   // Destination-specific states
   const [email, setEmail] = useState("");
+  const [emailSubject, setEmailSubject] = useState("");
+  const [emailBody, setEmailBody] = useState("");
   const [fileName, setFileName] = useState("");
   const [usbDrives, setUsbDrives] = useState<UsbDriveInfo[]>([]);
   const [selectedUsbDevice, setSelectedUsbDevice] = useState<string>("");
@@ -225,6 +227,8 @@ export function ScanMenu() {
 
     if (destination === "email") {
       payload.recipient = email.trim();
+      payload.subject = emailSubject.trim() || null;
+      payload.body = emailBody.trim() || null;
     } else if (destination === "usb") {
       payload.device = selectedDrive?.device ?? selectedUsbDevice;
       payload.mount_path = selectedDrive?.mountpoint ?? null;
@@ -632,6 +636,32 @@ export function ScanMenu() {
                         .{outputFormat}
                       </span>
                     </div>
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-zinc-400">
+                      Subject (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={emailSubject}
+                      onChange={(e) => setEmailSubject(e.target.value)}
+                      disabled={hardwareBusy}
+                      placeholder="Scan: <filename> (auto)"
+                      className="mt-1.5 w-full rounded-xl border border-kiosk-industrial-border bg-kiosk-industrial-navy px-4 py-2.5 text-base text-white placeholder:text-zinc-500 focus:border-amber-500 focus:outline-none disabled:opacity-50"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-bold uppercase tracking-wider text-zinc-400">
+                      Message Body (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      value={emailBody}
+                      onChange={(e) => setEmailBody(e.target.value)}
+                      disabled={hardwareBusy}
+                      placeholder="Attached is your scanned document from Kopi."
+                      className="mt-1.5 w-full rounded-xl border border-kiosk-industrial-border bg-kiosk-industrial-navy px-4 py-2.5 text-base text-white placeholder:text-zinc-500 focus:border-amber-500 focus:outline-none disabled:opacity-50"
+                    />
                   </div>
                 </div>
               )}

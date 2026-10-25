@@ -1,4 +1,4 @@
-"""ID Card Copy / Scan workflow endpoints (/api/id-scan/* and /api/settings/public)."""
+"""ID Card Copy / Scan workflow endpoints (/api/id-scan/*)."""
 
 from __future__ import annotations
 
@@ -121,12 +121,8 @@ class IdScanSessionBody(BaseModel):
 class IdScanEmailBody(BaseModel):
     session_id: str = Field(..., min_length=8)
     recipient: str = Field(..., min_length=3)
-
-
-@router.get("/settings/public")
-async def api_settings_public() -> dict[str, Any]:
-    settings = load_settings()
-    return {"id_scan_ocr": bool(settings.id_scan_ocr)}
+    subject: str | None = None
+    body: str | None = None
 
 
 @router.post("/id-scan/front")
@@ -275,10 +271,14 @@ async def api_id_scan_email(body: IdScanEmailBody) -> dict[str, Any]:
     except OSError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    default_subject = f"ID scan {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC"
+    subject = (body.subject or "").strip() or default_subject
+    email_body = (body.body or "").strip() or None
     ok, err = mailer.send_pdf_email(
         pdf_bytes,
         to_addr=body.recipient.strip(),
-        subject=f"ID scan {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC",
+        subject=subject,
+        body=email_body,
         smtp=settings.smtp,
     )
     if not ok:

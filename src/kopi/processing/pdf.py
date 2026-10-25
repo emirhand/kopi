@@ -53,11 +53,8 @@ def _is_pdf_page_blank(page: object) -> bool:
 def remove_blank_pages_from_pdf(
     input_pdf: Path,
     output_pdf: Path,
-    *,
-    density: int = 150,
 ) -> tuple[bool, str | None]:
     """Remove blank pages from ``input_pdf`` and write the result to ``output_pdf``."""
-    _ = density
     if not input_pdf.is_file():
         return False, "Input PDF does not exist"
 

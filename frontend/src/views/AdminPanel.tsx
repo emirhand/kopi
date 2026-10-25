@@ -36,7 +36,6 @@ export function AdminPanel() {
   const [busy, setBusy] = useState(false);
   const [scannerDevice, setScannerDevice] = useState("");
   const [printerDevice, setPrinterDevice] = useState("");
-  const [usbRootsText, setUsbRootsText] = useState("/media\n/run/media\n/Volumes");
   const [idScanOcr, setIdScanOcr] = useState(false);
   const [pairingPin, setPairingPin] = useState("");
   const [pairingPinSet, setPairingPinSet] = useState(false);
@@ -82,11 +81,6 @@ export function AdminPanel() {
         setSmtpPasswordSet(Boolean(data.smtp?.password_set));
         setScannerDevice(typeof data.scanner_device === "string" ? data.scanner_device : "");
         setPrinterDevice(typeof data.printer_device === "string" ? data.printer_device : "");
-        setUsbRootsText(
-          Array.isArray(data.usb_roots) && data.usb_roots.length > 0
-            ? data.usb_roots.join("\n")
-            : "/media\n/run/media\n/Volumes",
-        );
         setIdScanOcr(Boolean(data.id_scan_ocr));
         setPairingPin("");
         setPairingPinSet(Boolean(data.pairing_pin_set));
@@ -164,10 +158,6 @@ export function AdminPanel() {
           smtp,
           scanner_device: scannerDevice,
           printer_device: printerDevice,
-          usb_roots: usbRootsText
-            .split("\n")
-            .map((x) => x.trim())
-            .filter(Boolean),
           id_scan_ocr: idScanOcr,
           pairing_pin: pairingPin.trim() || undefined,
           new_admin_password: newAdminPw || undefined,
@@ -317,15 +307,6 @@ export function AdminPanel() {
               </option>
             ))}
           </select>
-        </label>
-        <label className="text-sm text-kiosk-muted">
-          USB roots (one per line)
-          <textarea
-            className={`${field} mt-1 min-h-[5rem]`}
-            value={usbRootsText}
-            onChange={(e) => setUsbRootsText(e.target.value)}
-            spellCheck={false}
-          />
         </label>
         <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">ID scan</h3>
         <KioskButton
