@@ -22,6 +22,8 @@ from .printer import (
     build_lp_cmd,
     classify_print_error,
     list_printer_queues,
+    list_printer_queues_async,
+    reset_printer_discovery_cache,
 )
 from .scanner import (
     SCANNER_BUSY_RECOVERY_HINT,
@@ -31,6 +33,8 @@ from .scanner import (
     classify_scan_error,
     is_scanner_busy_error,
     list_scan_devices,
+    list_scan_devices_async,
+    reset_scanner_discovery_cache,
 )
 from .usb import (
     UsbVolume,
@@ -80,6 +84,8 @@ def reset_bridges() -> None:
     _scanner = None
     _printer = None
     _hardware_lock = None
+    reset_scanner_discovery_cache()
+    reset_printer_discovery_cache()
 
 
 __all__ = [
@@ -109,7 +115,9 @@ __all__ = [
     "get_scanner",
     "is_scanner_busy_error",
     "list_printer_queues",
+    "list_printer_queues_async",
     "list_scan_devices",
+    "list_scan_devices_async",
     "list_usb_volumes",
     "mount_usb_partition",
     "reset_bridges",

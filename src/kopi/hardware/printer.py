@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 from typing import Final
 
@@ -131,6 +132,53 @@ def list_printer_queues(timeout_sec: int = 8) -> list[str]:
     return sorted(dict.fromkeys(destinations))
 
 
+_PRINTER_CACHE_TTL_SEC: Final[float] = 15.0
+_printer_discovery_lock: asyncio.Lock | None = None
+_cached_printer_queues: list[str] = []
+_cached_printer_queues_ts: float = 0.0
+
+
+def reset_printer_discovery_cache() -> None:
+    """Clear the cached printer queue list and single-flight lock."""
+    global _printer_discovery_lock, _cached_printer_queues, _cached_printer_queues_ts
+    _printer_discovery_lock = None
+    _cached_printer_queues = []
+    _cached_printer_queues_ts = 0.0
+
+
+async def list_printer_queues_async(
+    *,
+    force_refresh: bool = False,
+    timeout_sec: int = 8,
+) -> list[str]:
+    """Run `list_printer_queues` in a worker thread with single-flight coalescing."""
+    global _printer_discovery_lock, _cached_printer_queues, _cached_printer_queues_ts
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _cached_printer_queues_ts > 0.0
+        and (now - _cached_printer_queues_ts) < _PRINTER_CACHE_TTL_SEC
+    ):
+        return list(_cached_printer_queues)
+
+    if _printer_discovery_lock is None:
+        _printer_discovery_lock = asyncio.Lock()
+
+    async with _printer_discovery_lock:
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and _cached_printer_queues_ts > 0.0
+            and (now - _cached_printer_queues_ts) < _PRINTER_CACHE_TTL_SEC
+        ):
+            return list(_cached_printer_queues)
+
+        queues = await asyncio.to_thread(list_printer_queues, timeout_sec)
+        _cached_printer_queues = list(queues)
+        _cached_printer_queues_ts = time.monotonic()
+        return list(_cached_printer_queues)
+
+
 def _kill_quiet(proc: asyncio.subprocess.Process) -> None:
     try:
         proc.kill()
@@ -184,10 +232,11 @@ class RealPrinterBridge(PrinterBridge):
         device: str | None = None,
         timeout_sec: int = 120,
     ) -> PrintResult:
-        with tempfile.NamedTemporaryFile(suffix=".pdf", delete=False) as tmp:
-            tmp.write(pdf_bytes)
-            tmp_path = Path(tmp.name)
+        fd, tmp_name = tempfile.mkstemp(prefix="kopi-print-", suffix=".pdf")
+        os.close(fd)
+        tmp_path = Path(tmp_name)
         try:
+            tmp_path.write_bytes(pdf_bytes)
             return await self.print_file(
                 str(tmp_path),
                 copies=copies,

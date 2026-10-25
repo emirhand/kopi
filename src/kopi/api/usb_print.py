@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -43,20 +44,22 @@ def _format_bytes(size: int) -> str:
     return f"{int(size)} B"
 
 
-def _resolve_confined_usb_path(
+async def _resolve_confined_usb_path(
     *,
     mount_path: str | None,
     device: str | None,
     rel_path: str,
 ) -> tuple[Path, Path]:
     """Resolve USB root mount and ensure rel_path stays strictly inside it."""
-    vols = list_usb_volumes()
+    vols = await asyncio.to_thread(list_usb_volumes)
     try:
-        usb_root = resolve_writable_usb_mount(
+        resolved_mount = await asyncio.to_thread(
+            resolve_writable_usb_mount,
             mount_path,
             device=device,
             volumes=vols,
-        ).resolve()
+        )
+        usb_root = resolved_mount.resolve()
     except (FileNotFoundError, PermissionError) as e:
         raise HTTPException(status_code=400, detail=str(e) or "USB drive not available") from e
 
@@ -110,7 +113,7 @@ async def api_usb_list_files(
     subpath: str = Query(default=""),
 ) -> dict[str, Any]:
     """List folders and printable files inside the selected USB flash drive."""
-    usb_root, current_dir = _resolve_confined_usb_path(
+    usb_root, current_dir = await _resolve_confined_usb_path(
         mount_path=mount_path,
         device=device,
         rel_path=subpath,
@@ -187,7 +190,7 @@ async def api_usb_preview_file(
     device: str | None = Query(default=None),
 ) -> Response:
     """Render a PNG preview of a printable file on the USB drive."""
-    _usb_root, target = _resolve_confined_usb_path(
+    _usb_root, target = await _resolve_confined_usb_path(
         mount_path=mount_path,
         device=device,
         rel_path=path,
@@ -314,21 +317,24 @@ def _prepare_printable_file(target: Path) -> tuple[str, Path | None]:
                 rgb.save(buf, format="PNG")
                 pdf_bytes = img2pdf.convert([buf.getvalue()])
         if not pdf_bytes:
-            temp_pdf.unlink(missing_ok=True)
             raise HTTPException(status_code=400, detail="Could not convert image for printing")
         temp_pdf.write_bytes(bytes(pdf_bytes))
         return str(temp_pdf), temp_pdf
     except HTTPException:
+        temp_pdf.unlink(missing_ok=True)
         raise
     except Exception as e:
         temp_pdf.unlink(missing_ok=True)
         raise HTTPException(status_code=400, detail=f"Could not prepare image for printing: {e}") from e
+    except BaseException:
+        temp_pdf.unlink(missing_ok=True)
+        raise
 
 
 @router.post("/print")
 async def api_usb_print_file(body: UsbPrintBody) -> dict[str, Any]:
     """Print a selected file from a USB flash drive via CUPS."""
-    _usb_root, target = _resolve_confined_usb_path(
+    _usb_root, target = await _resolve_confined_usb_path(
         mount_path=body.mount_path,
         device=body.device,
         rel_path=body.path,

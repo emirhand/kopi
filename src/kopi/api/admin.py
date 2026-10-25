@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException
@@ -10,7 +11,11 @@ from pydantic import BaseModel, Field
 from kopi.auth.pairing import get_pairing_provider
 from kopi.auth.rate_limit import get_auth_rate_limiter
 from kopi.config import SmtpConfig, load_settings, save_settings, verify_admin_password
-from kopi.hardware import list_printer_queues, list_scan_devices
+from kopi.hardware import (
+    get_hardware_lock,
+    list_printer_queues_async,
+    list_scan_devices_async,
+)
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 ADMIN_AUTH_SCOPE = "admin_password"
@@ -62,6 +67,11 @@ async def api_admin_settings(
     settings = load_settings()
     smtp_data = settings.smtp.model_dump(exclude={"password"})
     smtp_data["password_set"] = bool(settings.smtp.password)
+    lock = get_hardware_lock()
+    scanners, printers = await asyncio.gather(
+        list_scan_devices_async(is_busy=lock.is_busy),
+        list_printer_queues_async(),
+    )
     return {
         "smtp": smtp_data,
         "scanner_device": settings.scanner_device,
@@ -72,8 +82,8 @@ async def api_admin_settings(
         "paired_device_label": settings.paired_device_label,
         "paired_at": settings.paired_at,
         "hardware_options": {
-            "scanners": list_scan_devices(),
-            "printers": list_printer_queues(),
+            "scanners": scanners,
+            "printers": printers,
         },
     }
 

@@ -120,6 +120,22 @@ def test_build_scanimage_cmds_apply_original_size_geometry() -> None:
     ]
 
 
+def test_build_scanimage_cmds_parse_quoted_extra_args_with_shlex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kopi.hardware.scanner import build_scanimage_batch_cmd
+
+    monkeypatch.setenv("SCANIMAGE_EXTRA_ARGS", '--page-format "ISO A4" --brightness=10')
+
+    cmd_doc = build_scanimage_document_cmd(duplex_scan=False, color=True)
+    idx_doc = cmd_doc.index("--page-format")
+    assert cmd_doc[idx_doc : idx_doc + 3] == ["--page-format", "ISO A4", "--brightness=10"]
+
+    cmd_batch = build_scanimage_batch_cmd(batch_pattern="/tmp/batch/page-%04d.png")
+    idx_batch = cmd_batch.index("--page-format")
+    assert cmd_batch[idx_batch : idx_batch + 3] == ["--page-format", "ISO A4", "--brightness=10"]
+
+
 def test_build_lp_cmd_full_copier_options() -> None:
     cmd = build_lp_cmd(
         "/tmp/doc.pdf",
@@ -316,6 +332,41 @@ async def test_scanner_cancel_terminates_active_scanimage_process(
 
 
 @pytest.mark.asyncio
+async def test_cancel_scan_between_jobs_does_not_affect_next_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from kopi.hardware.scanner import MockScannerBridge, RealScannerBridge
+
+    monkeypatch.setenv("KOPI_MOCK_DELAY_SEC", "0.01")
+    mock_bridge = MockScannerBridge()
+    assert await mock_bridge.cancel_scan() is False
+    mock_res = await mock_bridge.scan_pdf(duplex=False, resolution_dpi=150, color=True)
+    assert mock_res.ok is True
+
+    real_bridge = RealScannerBridge()
+    assert await real_bridge.cancel_scan() is False
+
+    class FakeJpegProc:
+        returncode = 0
+
+        async def communicate(self) -> tuple[bytes, bytes]:
+            return b"\xff\xd8\xff\xe0\x00\x10JFIF\xff\xd9", b""
+
+        async def wait(self) -> int:
+            return 0
+
+    async def fake_subprocess_exec(*_args: str, **_kwargs: object) -> FakeJpegProc:
+        return FakeJpegProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_subprocess_exec)
+    real_res = await real_bridge.scan_pdf(
+        duplex=False, resolution_dpi=150, color=True, output_format="jpeg"
+    )
+    assert real_res.ok is True
+
+
+
+@pytest.mark.asyncio
 async def test_printer_cancel_invokes_cups_cancel_on_last_job(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -351,5 +402,43 @@ async def test_printer_cancel_invokes_cups_cancel_on_last_job(
     cancel_ok = await bridge.cancel_print()
     assert cancel_ok is True
     assert ["cancel", "HP_OfficeJet_Pro_9010-42"] in commands_run
+
+
+@pytest.mark.asyncio
+async def test_list_scan_devices_async_coalesces_caches_and_skips_when_busy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kopi.hardware.scanner as scanner_mod
+    from kopi.hardware import list_scan_devices_async, reset_bridges
+
+    reset_bridges()
+    calls = 0
+
+    def fake_list_scan_devices(_timeout_sec: int = 8) -> list[str]:
+        nonlocal calls
+        calls += 1
+        return ["hpaio:/usb/HP_OfficeJet_Pro_9010"]
+
+    monkeypatch.setattr(scanner_mod, "list_scan_devices", fake_list_scan_devices)
+
+    # When busy before any cache exists, returns [] without invoking scanimage -L
+    assert await list_scan_devices_async(is_busy=True) == []
+    assert calls == 0
+
+    # Concurrent callers coalesce into a single thread invocation and populate cache
+    r1, r2 = await asyncio.gather(
+        list_scan_devices_async(is_busy=False),
+        list_scan_devices_async(is_busy=False),
+    )
+    assert r1 == ["hpaio:/usb/HP_OfficeJet_Pro_9010"]
+    assert r2 == ["hpaio:/usb/HP_OfficeJet_Pro_9010"]
+    assert calls == 1
+
+    # When busy after cache is populated, returns cached list without calling scanimage -L
+    assert await list_scan_devices_async(is_busy=True, force_refresh=True) == [
+        "hpaio:/usb/HP_OfficeJet_Pro_9010"
+    ]
+    assert calls == 1
+
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 import logging
 import os
@@ -406,7 +407,7 @@ class ScanArchiveBody(BaseModel):
 @router.get("/usb/drives")
 async def api_list_usb_drives() -> dict[str, Any]:
     """List removable USB mass-storage drives (filtered to storage volumes only)."""
-    vols = list_usb_volumes()
+    vols = await asyncio.to_thread(list_usb_volumes)
     return {"drives": [v.to_dict() for v in vols]}
 
 
@@ -472,9 +473,10 @@ async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
 
 @router.post("/usb")
 async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)) -> dict[str, Any]:
-    vols = list_usb_volumes()
+    vols = await asyncio.to_thread(list_usb_volumes)
     try:
-        mount = resolve_writable_usb_mount(
+        mount = await asyncio.to_thread(
+            resolve_writable_usb_mount,
             body.mount_path,
             device=body.device,
             volumes=vols,

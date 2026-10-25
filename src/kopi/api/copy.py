@@ -43,7 +43,7 @@ class ScanStore:
         self._lock = asyncio.Lock()
         self._data: dict[str, tuple[float, list[str]]] = {}
 
-    def _purge_unlocked(self) -> None:
+    def _purge_unlocked(self) -> int:
         now = time.monotonic()
         dead = [k for k, (exp, _) in self._data.items() if exp <= now]
         for k in dead:
@@ -53,6 +53,12 @@ class ScanStore:
                     Path(p).unlink(missing_ok=True)
                 except OSError:
                     pass
+        return len(dead)
+
+    async def purge_expired(self) -> int:
+        """Acquire lock and remove all expired scan entries and their temporary files."""
+        async with self._lock:
+            return self._purge_unlocked()
 
     async def put_path(self, path: str, *, scan_id: str | None = None) -> str:
         return await self.put_paths([path], scan_id=scan_id)
@@ -398,19 +404,19 @@ async def api_print(body: PrintBody) -> dict[str, Any]:
                 device=settings.printer_device.strip() or None,
             )
     except HardwareBusyError as e:
-        if temp_combined_pdf is not None:
-            temp_combined_pdf.unlink(missing_ok=True)
         await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
         raise HTTPException(status_code=409, detail=str(e)) from e
-
-    if not result.ok:
+    except BaseException:
+        await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
+        raise
+    finally:
         if temp_combined_pdf is not None:
             temp_combined_pdf.unlink(missing_ok=True)
+
+    if not result.ok:
         await SCAN_STORE.put_paths(page_paths, scan_id=body.scan_id)
         raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
 
-    if temp_combined_pdf is not None:
-        temp_combined_pdf.unlink(missing_ok=True)
     for p in page_paths:
         try:
             Path(p).unlink(missing_ok=True)

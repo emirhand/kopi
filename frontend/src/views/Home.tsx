@@ -76,7 +76,7 @@ export function Home() {
 
   const refreshHardware = useCallback(async () => {
     try {
-      const res = await fetch(apiUrl("/api/hardware"));
+      const res = await fetch(apiUrl("/api/hardware?include_devices=false"));
       if (!res.ok) return;
       const data = await res.json();
       setHardware(normalizeHardware(data));

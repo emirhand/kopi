@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 import os
+import shutil
 import socket
 import sys
+import tempfile
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import uvicorn
@@ -18,6 +23,8 @@ from kopi.api import admin, copy, hardware, id_scan, pairing, scan, usb_print
 from kopi.auth.dependencies import require_paired_client
 from kopi.auth.pairing import get_pairing_provider
 from kopi.config import get_settings_path, load_settings
+
+log = logging.getLogger("kopi.main")
 
 
 def setup_logging() -> None:
@@ -59,10 +66,67 @@ def _resolve_cors_origins() -> list[str]:
     ]
 
 
+def sweep_orphaned_temp_files(temp_dir: Path | None = None) -> int:
+    """Remove orphaned `kopi-*` temporary files and directories from previous runs."""
+    target_dir = temp_dir if temp_dir is not None else Path(tempfile.gettempdir())
+    if not target_dir.is_dir():
+        return 0
+    removed = 0
+    for entry in target_dir.glob("kopi-*"):
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink(missing_ok=True)
+            removed += 1
+        except OSError:
+            pass
+    if removed:
+        log.info("temp_sweep_completed removed=%d dir=%s", removed, target_dir)
+    return removed
+
+
+async def purge_expired_stores_once() -> int:
+    """Purge expired entries from both ScanStore and IdScanStore."""
+    removed_scans = await copy.SCAN_STORE.purge_expired()
+    removed_id_scans = await id_scan.ID_SCAN_STORE.purge_expired()
+    return removed_scans + removed_id_scans
+
+
+async def _periodic_store_purge_loop(interval_sec: float) -> None:
+    while True:
+        await asyncio.sleep(interval_sec)
+        try:
+            await purge_expired_stores_once()
+        except Exception:
+            log.warning("store_purge_loop_error", exc_info=True)
+
+
+@contextlib.asynccontextmanager
+async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    raw_interval = os.environ.get("KOPI_PURGE_INTERVAL_SEC", "60").strip()
+    try:
+        interval = max(1.0, float(raw_interval))
+    except ValueError:
+        interval = 60.0
+    task = asyncio.create_task(_periodic_store_purge_loop(interval))
+    try:
+        yield
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 def create_app() -> FastAPI:
     """Create and configure the Kopi FastAPI application instance."""
     setup_logging()
-    application = FastAPI(title="Kopi — Linux Smart Copier Appliance", version="0.1.0")
+    sweep_orphaned_temp_files()
+    application = FastAPI(
+        title="Kopi — Linux Smart Copier Appliance",
+        version="0.1.0",
+        lifespan=_app_lifespan,
+    )
 
     application.add_middleware(
         CORSMiddleware,

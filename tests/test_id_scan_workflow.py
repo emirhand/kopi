@@ -76,3 +76,51 @@ async def test_id_scan_full_wizard_flow(
         disc_res = await client.post("/api/id-scan/discard", json={"session_id": session_id})
         assert disc_res.status_code == 200
         assert disc_res.json()["ok"] is True
+
+
+@pytest.mark.asyncio
+async def test_id_scan_compose_cleans_up_temp_pdfs_on_ocr_exception(
+    app: FastAPI, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import tempfile
+
+    import kopi.api.id_scan as id_scan_mod
+    from kopi.config import load_settings, save_settings
+
+    settings = load_settings()
+    settings.id_scan_ocr = True
+    save_settings(settings)
+
+    created_temp_files: list[Path] = []
+    real_mkstemp = tempfile.mkstemp
+
+    def tracking_mkstemp(
+        suffix: str | None = None,
+        prefix: str | None = None,
+        dir: str | None = None,
+        text: bool = False,
+    ) -> tuple[int, str]:
+        fd, name = real_mkstemp(suffix=suffix, prefix=prefix, dir=dir, text=text)
+        if "kopi-id-composed-" in name or "kopi-id-ocr-" in name:
+            created_temp_files.append(Path(name))
+        return fd, name
+
+    def exploding_ocr(_in_pdf: Path, _out_pdf: Path) -> tuple[bool, str | None]:
+        raise RuntimeError("Simulated unexpected OCR crash")
+
+    monkeypatch.setattr(tempfile, "mkstemp", tracking_mkstemp)
+    monkeypatch.setattr(id_scan_mod, "apply_ocrmypdf", exploding_ocr)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        front_res = await client.post("/api/id-scan/front")
+        sid = front_res.json()["session_id"]
+        await client.post("/api/id-scan/back", json={"session_id": sid})
+
+        with pytest.raises(RuntimeError, match="Simulated unexpected OCR crash"):
+            await client.post("/api/id-scan/compose", json={"session_id": sid})
+
+        assert len(created_temp_files) == 2
+        for p in created_temp_files:
+            assert not p.exists(), f"Leaked temp file: {p}"
+
+        await client.post("/api/id-scan/discard", json={"session_id": sid})

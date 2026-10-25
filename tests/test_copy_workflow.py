@@ -16,7 +16,7 @@ from kopi.hardware import (
     get_hardware_lock,
     reset_bridges,
 )
-from kopi.main import create_app
+from kopi.main import create_app, sweep_orphaned_temp_files
 
 
 @pytest.fixture
@@ -42,6 +42,13 @@ async def test_health_and_hardware_endpoints(app: FastAPI) -> None:
         assert "printers" in body
         assert "usb_volumes" in body
         assert body["busy"] is False
+
+        res_hw_usb_only = await client.get("/api/hardware", params={"include_devices": "false"})
+        assert res_hw_usb_only.status_code == 200
+        usb_only_body = res_hw_usb_only.json()
+        assert usb_only_body["scanners"] == []
+        assert usb_only_body["printers"] == []
+        assert "usb_volumes" in usb_only_body
 
 
 @pytest.mark.asyncio
@@ -349,5 +356,57 @@ async def test_all_four_scan_to_print_sided_modes(
         assert copy_res.status_code == 200
         assert recorded["scan_duplex"] is scan_duplex
         assert recorded["print_duplex"] is print_duplex
+
+
+def test_startup_sweep_removes_orphaned_kopi_temp_files(tmp_path: Path) -> None:
+    orphan_file = tmp_path / "kopi-copy-abc123.png"
+    orphan_pdf = tmp_path / "kopi-id-composed-xyz.pdf"
+    orphan_dir = tmp_path / "kopi-adf-batch-999"
+    unrelated_file = tmp_path / "other-app-temp.txt"
+
+    orphan_file.write_bytes(b"png")
+    orphan_pdf.write_bytes(b"pdf")
+    orphan_dir.mkdir()
+    (orphan_dir / "page-0001.png").write_bytes(b"page")
+    unrelated_file.write_text("keep", encoding="utf-8")
+
+    removed = sweep_orphaned_temp_files(tmp_path)
+    assert removed == 3
+    assert not orphan_file.exists()
+    assert not orphan_pdf.exists()
+    assert not orphan_dir.exists()
+    assert unrelated_file.is_file()
+
+
+@pytest.mark.asyncio
+async def test_periodic_purge_removes_expired_scan_and_id_scan_files(
+    tmp_path: Path,
+) -> None:
+    from kopi.api.copy import ScanStore
+    from kopi.api.id_scan import IdScanStore
+
+    scan_file = tmp_path / "expired-copy.png"
+    scan_file.write_bytes(b"png")
+    scan_store = ScanStore(ttl_sec=-1)
+    await scan_store.put_path(str(scan_file))
+    assert scan_file.is_file()
+
+    # Without any store read/write access, purge_expired() removes the expired file
+    purged_scans = await scan_store.purge_expired()
+    assert purged_scans == 1
+    assert not scan_file.exists()
+
+    id_front = tmp_path / "expired-id-front.png"
+    id_front.write_bytes(b"front")
+    id_store = IdScanStore(ttl_sec=60)
+    sid = await id_store.create_session()
+    await id_store.set_side(sid, "front", str(id_front))
+    assert id_front.is_file()
+
+    # Force expiry and run purge_expired()
+    id_store._data[sid] = (0.0, id_store._data[sid][1])
+    purged_ids = await id_store.purge_expired()
+    assert purged_ids == 1
+    assert not id_front.exists()
 
 

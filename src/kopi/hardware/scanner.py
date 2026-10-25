@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
 import logging
 import os
 import re
+import shlex
 import subprocess
 import tempfile
+import time
+from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
@@ -139,7 +144,7 @@ def build_scanimage_document_cmd(
 
     extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
     if extra:
-        cmd.extend(extra.split())
+        cmd.extend(shlex.split(extra))
 
     cmd.extend(["-o", output_path])
     return cmd
@@ -178,7 +183,7 @@ def build_scanimage_batch_cmd(
 
     extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
     if extra:
-        cmd.extend(extra.split())
+        cmd.extend(shlex.split(extra))
 
     cmd.append(f"--batch={batch_pattern}")
     return cmd
@@ -215,6 +220,59 @@ def list_scan_devices(timeout_sec: int = 8) -> list[str]:
             devices.append(m_fallback.group(1).strip("`'\""))
     filtered = [d for d in dict.fromkeys(devices) if not d.lower().startswith("v4l:")]
     return sorted(filtered)
+
+
+_SCANNER_CACHE_TTL_SEC: Final[float] = 30.0
+_scanner_discovery_lock: asyncio.Lock | None = None
+_cached_scan_devices: list[str] = []
+_cached_scan_devices_ts: float = 0.0
+
+
+def reset_scanner_discovery_cache() -> None:
+    """Clear the cached scanner device list and single-flight lock."""
+    global _scanner_discovery_lock, _cached_scan_devices, _cached_scan_devices_ts
+    _scanner_discovery_lock = None
+    _cached_scan_devices = []
+    _cached_scan_devices_ts = 0.0
+
+
+async def list_scan_devices_async(
+    *,
+    is_busy: bool = False,
+    force_refresh: bool = False,
+    timeout_sec: int = 8,
+) -> list[str]:
+    """Run `list_scan_devices` in a worker thread with single-flight coalescing and busy guard."""
+    global _scanner_discovery_lock, _cached_scan_devices, _cached_scan_devices_ts
+    if is_busy:
+        return list(_cached_scan_devices)
+
+    now = time.monotonic()
+    if (
+        not force_refresh
+        and _cached_scan_devices_ts > 0.0
+        and (now - _cached_scan_devices_ts) < _SCANNER_CACHE_TTL_SEC
+    ):
+        return list(_cached_scan_devices)
+
+    if _scanner_discovery_lock is None:
+        _scanner_discovery_lock = asyncio.Lock()
+
+    async with _scanner_discovery_lock:
+        if is_busy:
+            return list(_cached_scan_devices)
+        now = time.monotonic()
+        if (
+            not force_refresh
+            and _cached_scan_devices_ts > 0.0
+            and (now - _cached_scan_devices_ts) < _SCANNER_CACHE_TTL_SEC
+        ):
+            return list(_cached_scan_devices)
+
+        devices = await asyncio.to_thread(list_scan_devices, timeout_sec)
+        _cached_scan_devices = list(devices)
+        _cached_scan_devices_ts = time.monotonic()
+        return list(_cached_scan_devices)
 
 
 def _kill_quiet(proc: asyncio.subprocess.Process) -> None:
@@ -322,17 +380,38 @@ def _mock_delay(default_sec: float = 0.25) -> float:
     return default_sec
 
 
+@dataclass
+class _ScanJobState:
+    cancelled: bool = False
+    proc: asyncio.subprocess.Process | None = None
+
+
 class RealScannerBridge(ScannerBridge):
     def __init__(self) -> None:
-        self._active_proc: asyncio.subprocess.Process | None = None
-        self._cancel_requested: bool = False
+        self._active_job: _ScanJobState | None = None
+
+    @contextlib.contextmanager
+    def _job_scope(self) -> Iterator[_ScanJobState]:
+        if self._active_job is not None:
+            yield self._active_job
+            return
+        job = _ScanJobState()
+        self._active_job = job
+        try:
+            yield job
+        finally:
+            if self._active_job is job:
+                self._active_job = None
 
     async def cancel_scan(self) -> bool:
         """Stop the currently running scanimage process immediately."""
-        self._cancel_requested = True
-        proc = self._active_proc
-        if proc is None:
+        job = self._active_job
+        if job is None:
             return False
+        job.cancelled = True
+        proc = job.proc
+        if proc is None:
+            return True
         try:
             proc.terminate()
             log.info("scan_cancel_sent mode=real")
@@ -351,158 +430,158 @@ class RealScannerBridge(ScannerBridge):
         color: bool = True,
         output_format: str = "pdf",
     ) -> ScanResult:
-        self._cancel_requested = False
-        fmt_key = "jpeg" if output_format.lower() in ("jpg", "jpeg") else "pdf"
-        if fmt_key == "pdf":
-            file_res = await self.scan_copy_file(
-                duplex=duplex,
-                source=source,
-                device=device,
-                resolution_dpi=resolution_dpi,
-                color=color,
-                timeout_sec=timeout_sec,
-            )
-            if not file_res.ok:
-                return ScanResult(
-                    ok=False,
-                    stdout=b"",
-                    stderr=file_res.stderr,
-                    user_message=file_res.user_message,
+        with self._job_scope() as job:
+            fmt_key = "jpeg" if output_format.lower() in ("jpg", "jpeg") else "pdf"
+            if fmt_key == "pdf":
+                file_res = await self.scan_copy_file(
+                    duplex=duplex,
+                    source=source,
+                    device=device,
+                    resolution_dpi=resolution_dpi,
+                    color=color,
+                    timeout_sec=timeout_sec,
                 )
-            p = Path(file_res.path)
-            try:
-                if p.suffix.lower() == ".pdf":
-                    pdf_bytes = p.read_bytes()
-                else:
-                    converted = img2pdf.convert(str(p))
-                    pdf_bytes = converted if converted else b""
-            finally:
-                p.unlink(missing_ok=True)
-            if not pdf_bytes:
-                return ScanResult(
-                    ok=False,
-                    stdout=b"",
-                    stderr=file_res.stderr,
-                    user_message="Failed to convert scanned page to PDF",
-                )
-            return ScanResult(ok=True, stdout=pdf_bytes, stderr=file_res.stderr, user_message=None)
+                if not file_res.ok:
+                    return ScanResult(
+                        ok=False,
+                        stdout=b"",
+                        stderr=file_res.stderr,
+                        user_message=file_res.user_message,
+                    )
+                p = Path(file_res.path)
+                try:
+                    if p.suffix.lower() == ".pdf":
+                        pdf_bytes = p.read_bytes()
+                    else:
+                        converted = img2pdf.convert(str(p))
+                        pdf_bytes = converted if converted else b""
+                finally:
+                    p.unlink(missing_ok=True)
+                if not pdf_bytes:
+                    return ScanResult(
+                        ok=False,
+                        stdout=b"",
+                        stderr=file_res.stderr,
+                        user_message="Failed to convert scanned page to PDF",
+                    )
+                return ScanResult(ok=True, stdout=pdf_bytes, stderr=file_res.stderr, user_message=None)
 
-        cmd = build_scanimage_document_cmd(
-            duplex_scan=duplex,
-            source=source,
-            device=device,
-            output_format=output_format,
-            resolution_dpi=resolution_dpi,
-            color=color,
-            include_resolution=True,
-            include_mode=True,
-        )
-        log.info(
-            "scan_start mode=real duplex=%s source=%s fmt=%s dpi=%s color=%s device=%r cmd=%s",
-            duplex,
-            source,
-            fmt_key,
-            resolution_dpi,
-            color,
-            device,
-            " ".join(cmd),
-        )
-
-        async def run_once_raw(run_cmd: list[str]) -> tuple[int, bytes, str]:
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *run_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            except FileNotFoundError as e:
-                return 127, b"", str(e)
-
-            self._active_proc = proc
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-            except asyncio.TimeoutError:
-                _kill_quiet(proc)
-                await proc.wait()
-                return 124, b"", "timeout"
-            finally:
-                if self._active_proc is proc:
-                    self._active_proc = None
-            return proc.returncode or 0, stdout or b"", (stderr or b"").decode(errors="replace")
-
-        max_r, delay_s = busy_retry_settings()
-
-        async def run_once(run_cmd: list[str]) -> tuple[int, bytes, str]:
-            last: tuple[int, bytes, str] = (1, b"", "")
-            for attempt in range(max_r + 1):
-                rc, out, err = await run_once_raw(run_cmd)
-                last = (rc, out, err)
-                if self._cancel_requested or rc in (0, 127, 124) or not is_scanner_busy_error(err):
-                    return rc, out, err
-                if attempt < max_r:
-                    await asyncio.sleep(delay_s)
-            return last
-
-        rc, stdout, err_text = await run_once(cmd)
-        if self._cancel_requested:
-            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Cancelled")
-        if rc == 127:
-            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Scanner Not Found")
-        if rc == 124:
-            return ScanResult(
-                ok=False,
-                stdout=b"",
-                stderr=err_text,
-                user_message="Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT,
-            )
-
-        if rc != 0 and "--resolution" in err_text and "unrecognized option" in err_text:
-            fallback_cmd = build_scanimage_document_cmd(
+            cmd = build_scanimage_document_cmd(
                 duplex_scan=duplex,
                 source=source,
                 device=device,
                 output_format=output_format,
                 resolution_dpi=resolution_dpi,
                 color=color,
-                include_resolution=False,
+                include_resolution=True,
                 include_mode=True,
             )
-            rc, stdout, err_text = await run_once(fallback_cmd)
-            cmd = fallback_cmd
-
-        if self._cancel_requested:
-            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Cancelled")
-
-        if rc != 0:
-            msg = _scan_error_message(
-                err_text=err_text,
-                returncode=rc,
-                device=device,
-                cmd=cmd,
-            )
-            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
-
-        stdout = _normalize_pdf_bytes(stdout) if fmt_key == "pdf" else _trim_jpeg_bytes(stdout)
-        if not stdout:
-            msg = classify_scan_error(err_text) or "Scanner returned no data"
-            return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
-
-        if fmt_key == "pdf" and (not stdout.startswith(b"%PDF-") or b"%%EOF" not in stdout):
-            return ScanResult(
-                ok=False,
-                stdout=b"",
-                stderr=err_text,
-                user_message="Scanner returned non-PDF data; check scanner backend format support.",
-            )
-        if fmt_key == "jpeg" and not stdout.startswith(b"\xff\xd8\xff"):
-            return ScanResult(
-                ok=False,
-                stdout=b"",
-                stderr=err_text,
-                user_message="Scanner returned non-JPEG data; check scanner backend format support.",
+            log.info(
+                "scan_start mode=real duplex=%s source=%s fmt=%s dpi=%s color=%s device=%r cmd=%s",
+                duplex,
+                source,
+                fmt_key,
+                resolution_dpi,
+                color,
+                device,
+                " ".join(cmd),
             )
 
-        return ScanResult(ok=True, stdout=stdout, stderr=err_text, user_message=None)
+            async def run_once_raw(run_cmd: list[str]) -> tuple[int, bytes, str]:
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *run_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except FileNotFoundError as e:
+                    return 127, b"", str(e)
+
+                job.proc = proc
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+                except asyncio.TimeoutError:
+                    _kill_quiet(proc)
+                    await proc.wait()
+                    return 124, b"", "timeout"
+                finally:
+                    if job.proc is proc:
+                        job.proc = None
+                return proc.returncode or 0, stdout or b"", (stderr or b"").decode(errors="replace")
+
+            max_r, delay_s = busy_retry_settings()
+
+            async def run_once(run_cmd: list[str]) -> tuple[int, bytes, str]:
+                last: tuple[int, bytes, str] = (1, b"", "")
+                for attempt in range(max_r + 1):
+                    rc, out, err = await run_once_raw(run_cmd)
+                    last = (rc, out, err)
+                    if job.cancelled or rc in (0, 127, 124) or not is_scanner_busy_error(err):
+                        return rc, out, err
+                    if attempt < max_r:
+                        await asyncio.sleep(delay_s)
+                return last
+
+            rc, stdout, err_text = await run_once(cmd)
+            if job.cancelled:
+                return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Cancelled")
+            if rc == 127:
+                return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Scanner Not Found")
+            if rc == 124:
+                return ScanResult(
+                    ok=False,
+                    stdout=b"",
+                    stderr=err_text,
+                    user_message="Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT,
+                )
+
+            if rc != 0 and "--resolution" in err_text and "unrecognized option" in err_text:
+                fallback_cmd = build_scanimage_document_cmd(
+                    duplex_scan=duplex,
+                    source=source,
+                    device=device,
+                    output_format=output_format,
+                    resolution_dpi=resolution_dpi,
+                    color=color,
+                    include_resolution=False,
+                    include_mode=True,
+                )
+                rc, stdout, err_text = await run_once(fallback_cmd)
+                cmd = fallback_cmd
+
+            if job.cancelled:
+                return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message="Cancelled")
+
+            if rc != 0:
+                msg = _scan_error_message(
+                    err_text=err_text,
+                    returncode=rc,
+                    device=device,
+                    cmd=cmd,
+                )
+                return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
+
+            stdout = _normalize_pdf_bytes(stdout) if fmt_key == "pdf" else _trim_jpeg_bytes(stdout)
+            if not stdout:
+                msg = classify_scan_error(err_text) or "Scanner returned no data"
+                return ScanResult(ok=False, stdout=b"", stderr=err_text, user_message=msg)
+
+            if fmt_key == "pdf" and (not stdout.startswith(b"%PDF-") or b"%%EOF" not in stdout):
+                return ScanResult(
+                    ok=False,
+                    stdout=b"",
+                    stderr=err_text,
+                    user_message="Scanner returned non-PDF data; check scanner backend format support.",
+                )
+            if fmt_key == "jpeg" and not stdout.startswith(b"\xff\xd8\xff"):
+                return ScanResult(
+                    ok=False,
+                    stdout=b"",
+                    stderr=err_text,
+                    user_message="Scanner returned non-JPEG data; check scanner backend format support.",
+                )
+
+            return ScanResult(ok=True, stdout=stdout, stderr=err_text, user_message=None)
 
     async def scan_copy_file(
         self,
@@ -519,51 +598,149 @@ class RealScannerBridge(ScannerBridge):
         resize_percent: int = 100,
         timeout_sec: int = 300,
     ) -> ScanFileResult:
-        self._cancel_requested = False
+        with self._job_scope() as job:
 
-        async def exec_once(run_cmd: list[str]) -> tuple[int, str]:
+            async def exec_once(run_cmd: list[str]) -> tuple[int, str]:
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *run_cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except FileNotFoundError as e:
+                    return 127, str(e)
+                job.proc = proc
+                try:
+                    _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+                except asyncio.TimeoutError:
+                    _kill_quiet(proc)
+                    await proc.wait()
+                    return 124, "timeout"
+                finally:
+                    if job.proc is proc:
+                        job.proc = None
+                return proc.returncode or 0, (stderr or b"").decode(errors="replace")
+
+            max_r, delay_s = busy_retry_settings()
+
+            if _is_adf_source(duplex, source):
+                with tempfile.TemporaryDirectory(prefix="kopi-adf-batch-") as batch_td:
+                    batch_dir = Path(batch_td)
+                    batch_pattern = str(batch_dir / "page-%04d.png")
+                    cmd = build_scanimage_batch_cmd(
+                        batch_pattern=batch_pattern,
+                        duplex_scan=duplex,
+                        source=source,
+                        device=device,
+                        resolution_dpi=resolution_dpi,
+                        color=color,
+                        original_size=original_size,
+                    )
+                    log.info("scan_adf_batch_start mode=real cmd=%s", " ".join(cmd))
+
+                    rc, err_text = -1, ""
+                    for attempt in range(max_r + 1):
+                        rc, err_text = await exec_once(cmd)
+                        if (
+                            job.cancelled
+                            or rc in (0, 127, 124)
+                            or not is_scanner_busy_error(err_text)
+                        ):
+                            break
+                        if attempt < max_r:
+                            await asyncio.sleep(delay_s)
+
+                    if job.cancelled:
+                        return ScanFileResult(
+                            ok=False, path="", stderr=err_text, user_message="Cancelled"
+                        )
+                    if rc == 127:
+                        return ScanFileResult(
+                            ok=False, path="", stderr=err_text, user_message="Scanner Not Found"
+                        )
+                    if rc == 124:
+                        return ScanFileResult(
+                            ok=False,
+                            path="",
+                            stderr=err_text,
+                            user_message="Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT,
+                        )
+
+                    pages = sorted(
+                        p for p in batch_dir.glob("page-*.png") if p.is_file() and p.stat().st_size > 0
+                    )
+                    # In batch mode, scanimage loops until the ADF reports out-of-documents.
+                    # If at least 1 page was scanned before the feeder emptied, assemble the PDF!
+                    if pages and (rc == 0 or classify_scan_error(err_text) == "No Paper"):
+                        fd_pdf, pdf_path = tempfile.mkstemp(prefix="kopi-copy-adf-", suffix=".pdf")
+                        os.close(fd_pdf)
+                        out_pdf = Path(pdf_path)
+                        try:
+                            for p in pages:
+                                enhance_scanned_image_file(
+                                    p,
+                                    lighter_darker=lighter_darker,
+                                    content_type=content_type,
+                                    resize_mode=resize_mode,
+                                    resize_percent=resize_percent,
+                                )
+                            pdf_bytes = img2pdf.convert([str(p) for p in pages])
+                            if not pdf_bytes:
+                                out_pdf.unlink(missing_ok=True)
+                                return ScanFileResult(
+                                    ok=False,
+                                    path="",
+                                    stderr=err_text,
+                                    user_message="Failed to assemble scanned pages into PDF",
+                                )
+                            out_pdf.write_bytes(pdf_bytes)
+                        except Exception as e:
+                            out_pdf.unlink(missing_ok=True)
+                            return ScanFileResult(
+                                ok=False,
+                                path="",
+                                stderr=str(e),
+                                user_message=f"PDF assembly error: {e}",
+                            )
+                        except BaseException:
+                            out_pdf.unlink(missing_ok=True)
+                            raise
+                        log.info(
+                            "scan_adf_batch_ok pages=%d path=%s",
+                            len(pages),
+                            pdf_path,
+                        )
+                        return ScanFileResult(
+                            ok=True, path=pdf_path, stderr=err_text, user_message=None
+                        )
+
+                    msg = _scan_error_message(
+                        err_text=err_text, returncode=rc, device=device, cmd=cmd
+                    )
+                    return ScanFileResult(ok=False, path="", stderr=err_text, user_message=msg)
+
+            # Flatbed single-page path
+            fd, file_path = tempfile.mkstemp(prefix="kopi-copy-", suffix=".png")
+            os.close(fd)
+            output = Path(file_path)
+            keep_output = False
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    *run_cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            except FileNotFoundError as e:
-                return 127, str(e)
-            self._active_proc = proc
-            try:
-                _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-            except asyncio.TimeoutError:
-                _kill_quiet(proc)
-                await proc.wait()
-                return 124, "timeout"
-            finally:
-                if self._active_proc is proc:
-                    self._active_proc = None
-            return proc.returncode or 0, (stderr or b"").decode(errors="replace")
-
-        max_r, delay_s = busy_retry_settings()
-
-        if _is_adf_source(duplex, source):
-            with tempfile.TemporaryDirectory(prefix="kopi-adf-batch-") as batch_td:
-                batch_dir = Path(batch_td)
-                batch_pattern = str(batch_dir / "page-%04d.png")
-                cmd = build_scanimage_batch_cmd(
-                    batch_pattern=batch_pattern,
+                cmd = build_scanimage_document_cmd(
                     duplex_scan=duplex,
                     source=source,
                     device=device,
+                    output_format="png",
                     resolution_dpi=resolution_dpi,
                     color=color,
                     original_size=original_size,
+                    output_path=file_path,
                 )
-                log.info("scan_adf_batch_start mode=real cmd=%s", " ".join(cmd))
 
                 rc, err_text = -1, ""
                 for attempt in range(max_r + 1):
                     rc, err_text = await exec_once(cmd)
                     if (
-                        self._cancel_requested
+                        job.cancelled
                         or rc in (0, 127, 124)
                         or not is_scanner_busy_error(err_text)
                     ):
@@ -571,14 +748,10 @@ class RealScannerBridge(ScannerBridge):
                     if attempt < max_r:
                         await asyncio.sleep(delay_s)
 
-                if self._cancel_requested:
-                    return ScanFileResult(
-                        ok=False, path="", stderr=err_text, user_message="Cancelled"
-                    )
+                if job.cancelled:
+                    return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Cancelled")
                 if rc == 127:
-                    return ScanFileResult(
-                        ok=False, path="", stderr=err_text, user_message="Scanner Not Found"
-                    )
+                    return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Scanner Not Found")
                 if rc == 124:
                     return ScanFileResult(
                         ok=False,
@@ -586,125 +759,33 @@ class RealScannerBridge(ScannerBridge):
                         stderr=err_text,
                         user_message="Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT,
                     )
+                if rc != 0:
+                    msg = _scan_error_message(err_text=err_text, returncode=rc, device=device, cmd=cmd)
+                    return ScanFileResult(ok=False, path="", stderr=err_text, user_message=msg)
 
-                pages = sorted(
-                    p for p in batch_dir.glob("page-*.png") if p.is_file() and p.stat().st_size > 0
-                )
-                # In batch mode, scanimage loops until the ADF reports out-of-documents.
-                # If at least 1 page was scanned before the feeder emptied, assemble the PDF!
-                if pages and (rc == 0 or classify_scan_error(err_text) == "No Paper"):
-                    fd_pdf, pdf_path = tempfile.mkstemp(prefix="kopi-copy-adf-", suffix=".pdf")
-                    os.close(fd_pdf)
-                    out_pdf = Path(pdf_path)
-                    try:
-                        for p in pages:
-                            enhance_scanned_image_file(
-                                p,
-                                lighter_darker=lighter_darker,
-                                content_type=content_type,
-                                resize_mode=resize_mode,
-                                resize_percent=resize_percent,
-                            )
-                        pdf_bytes = img2pdf.convert([str(p) for p in pages])
-                        if not pdf_bytes:
-                            out_pdf.unlink(missing_ok=True)
-                            return ScanFileResult(
-                                ok=False,
-                                path="",
-                                stderr=err_text,
-                                user_message="Failed to assemble scanned pages into PDF",
-                            )
-                        out_pdf.write_bytes(pdf_bytes)
-                    except Exception as e:
-                        out_pdf.unlink(missing_ok=True)
+                try:
+                    if output.stat().st_size <= 0:
                         return ScanFileResult(
                             ok=False,
                             path="",
-                            stderr=str(e),
-                            user_message=f"PDF assembly error: {e}",
+                            stderr=err_text,
+                            user_message="Scanner returned no data",
                         )
-                    log.info(
-                        "scan_adf_batch_ok pages=%d path=%s",
-                        len(pages),
-                        pdf_path,
+                    enhance_scanned_image_file(
+                        output,
+                        lighter_darker=lighter_darker,
+                        content_type=content_type,
+                        resize_mode=resize_mode,
+                        resize_percent=resize_percent,
                     )
-                    return ScanFileResult(
-                        ok=True, path=pdf_path, stderr=err_text, user_message=None
-                    )
+                except OSError as e:
+                    return ScanFileResult(ok=False, path="", stderr=str(e), user_message=str(e))
 
-                msg = _scan_error_message(
-                    err_text=err_text, returncode=rc, device=device, cmd=cmd
-                )
-                return ScanFileResult(ok=False, path="", stderr=err_text, user_message=msg)
-
-        # Flatbed single-page path
-        fd, file_path = tempfile.mkstemp(prefix="kopi-copy-", suffix=".png")
-        os.close(fd)
-        output = Path(file_path)
-
-        cmd = build_scanimage_document_cmd(
-            duplex_scan=duplex,
-            source=source,
-            device=device,
-            output_format="png",
-            resolution_dpi=resolution_dpi,
-            color=color,
-            original_size=original_size,
-            output_path=file_path,
-        )
-
-        rc, err_text = -1, ""
-        for attempt in range(max_r + 1):
-            rc, err_text = await exec_once(cmd)
-            if (
-                self._cancel_requested
-                or rc in (0, 127, 124)
-                or not is_scanner_busy_error(err_text)
-            ):
-                break
-            if attempt < max_r:
-                await asyncio.sleep(delay_s)
-
-        if self._cancel_requested:
-            output.unlink(missing_ok=True)
-            return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Cancelled")
-        if rc == 127:
-            output.unlink(missing_ok=True)
-            return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Scanner Not Found")
-        if rc == 124:
-            output.unlink(missing_ok=True)
-            return ScanFileResult(
-                ok=False,
-                path="",
-                stderr=err_text,
-                user_message="Scanner Busy." + SCANNER_BUSY_RECOVERY_HINT,
-            )
-        if rc != 0:
-            output.unlink(missing_ok=True)
-            msg = _scan_error_message(err_text=err_text, returncode=rc, device=device, cmd=cmd)
-            return ScanFileResult(ok=False, path="", stderr=err_text, user_message=msg)
-
-        try:
-            if output.stat().st_size <= 0:
-                output.unlink(missing_ok=True)
-                return ScanFileResult(
-                    ok=False,
-                    path="",
-                    stderr=err_text,
-                    user_message="Scanner returned no data",
-                )
-            enhance_scanned_image_file(
-                output,
-                lighter_darker=lighter_darker,
-                content_type=content_type,
-                resize_mode=resize_mode,
-                resize_percent=resize_percent,
-            )
-        except OSError as e:
-            output.unlink(missing_ok=True)
-            return ScanFileResult(ok=False, path="", stderr=str(e), user_message=str(e))
-
-        return ScanFileResult(ok=True, path=file_path, stderr=err_text, user_message=None)
+                keep_output = True
+                return ScanFileResult(ok=True, path=file_path, stderr=err_text, user_message=None)
+            finally:
+                if not keep_output:
+                    output.unlink(missing_ok=True)
 
     async def scan_id_side(
         self,
@@ -713,85 +794,101 @@ class RealScannerBridge(ScannerBridge):
         device: str | None = None,
         timeout_sec: int = 180,
     ) -> ScanFileResult:
-        self._cancel_requested = False
-        fd, file_path = tempfile.mkstemp(prefix=f"kopi-id-{side_name}-", suffix=".png")
-        os.close(fd)
-        output = Path(file_path)
-        env = os.environ
-        cmd: list[str] = [
-            "scanimage",
-            "--format=png",
-            "-l",
-            "0",
-            "-t",
-            "0",
-            "-x",
-            "86",
-            "-y",
-            "54",
-            "--resolution",
-            env.get("SCAN_RESOLUTION", "300"),
-        ]
-        dev = device or env.get("SCAN_DEVICE")
-        if dev:
-            cmd.extend(["-d", dev])
-        extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
-        if extra:
-            cmd.extend(extra.split())
-        cmd.extend(["-o", file_path])
+        with self._job_scope() as job:
+            fd, file_path = tempfile.mkstemp(prefix=f"kopi-id-{side_name}-", suffix=".png")
+            os.close(fd)
+            output = Path(file_path)
+            keep_output = False
+            try:
+                env = os.environ
+                cmd: list[str] = [
+                    "scanimage",
+                    "--format=png",
+                    "-l",
+                    "0",
+                    "-t",
+                    "0",
+                    "-x",
+                    "86",
+                    "-y",
+                    "54",
+                    "--resolution",
+                    env.get("SCAN_RESOLUTION", "300"),
+                ]
+                dev = device or env.get("SCAN_DEVICE")
+                if dev:
+                    cmd.extend(["-d", dev])
+                extra = env.get("SCANIMAGE_EXTRA_ARGS", "").strip()
+                if extra:
+                    cmd.extend(shlex.split(extra))
+                cmd.extend(["-o", file_path])
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-        except FileNotFoundError as e:
-            output.unlink(missing_ok=True)
-            return ScanFileResult(ok=False, path="", stderr=str(e), user_message="Scanner Not Found")
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        *cmd,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                except FileNotFoundError as e:
+                    return ScanFileResult(ok=False, path="", stderr=str(e), user_message="Scanner Not Found")
 
-        self._active_proc = proc
-        try:
-            _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
-        except asyncio.TimeoutError:
-            _kill_quiet(proc)
-            await proc.wait()
-            output.unlink(missing_ok=True)
-            return ScanFileResult(ok=False, path="", stderr="timeout", user_message="Scanner Busy")
-        finally:
-            if self._active_proc is proc:
-                self._active_proc = None
+                job.proc = proc
+                try:
+                    _stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout_sec)
+                except asyncio.TimeoutError:
+                    _kill_quiet(proc)
+                    await proc.wait()
+                    return ScanFileResult(ok=False, path="", stderr="timeout", user_message="Scanner Busy")
+                finally:
+                    if job.proc is proc:
+                        job.proc = None
 
-        err_text = (stderr or b"").decode(errors="replace")
-        if self._cancel_requested:
-            output.unlink(missing_ok=True)
-            return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Cancelled")
-        if proc.returncode != 0:
-            output.unlink(missing_ok=True)
-            msg = classify_scan_error(err_text) or f"Scanner error: {err_text.strip() or proc.returncode}"
-            return ScanFileResult(ok=False, path="", stderr=err_text, user_message=msg)
+                err_text = (stderr or b"").decode(errors="replace")
+                if job.cancelled:
+                    return ScanFileResult(ok=False, path="", stderr=err_text, user_message="Cancelled")
+                if proc.returncode != 0:
+                    msg = classify_scan_error(err_text) or f"Scanner error: {err_text.strip() or proc.returncode}"
+                    return ScanFileResult(ok=False, path="", stderr=err_text, user_message=msg)
 
-        try:
-            if output.stat().st_size <= 0:
-                output.unlink(missing_ok=True)
-                return ScanFileResult(
-                    ok=False, path="", stderr=err_text, user_message="Scanner returned no data"
-                )
-        except OSError as e:
-            output.unlink(missing_ok=True)
-            return ScanFileResult(ok=False, path="", stderr=str(e), user_message=str(e))
+                try:
+                    if output.stat().st_size <= 0:
+                        return ScanFileResult(
+                            ok=False, path="", stderr=err_text, user_message="Scanner returned no data"
+                        )
+                except OSError as e:
+                    return ScanFileResult(ok=False, path="", stderr=str(e), user_message=str(e))
 
-        return ScanFileResult(ok=True, path=file_path, stderr=err_text, user_message=None)
+                keep_output = True
+                return ScanFileResult(ok=True, path=file_path, stderr=err_text, user_message=None)
+            finally:
+                if not keep_output:
+                    output.unlink(missing_ok=True)
 
 
 class MockScannerBridge(ScannerBridge):
     """Pure-Python mock scanner using Pillow (zero external binary dependencies)."""
 
     def __init__(self) -> None:
-        self._cancel_requested: bool = False
+        self._active_job: _ScanJobState | None = None
+
+    @contextlib.contextmanager
+    def _job_scope(self) -> Iterator[_ScanJobState]:
+        if self._active_job is not None:
+            yield self._active_job
+            return
+        job = _ScanJobState()
+        self._active_job = job
+        try:
+            yield job
+        finally:
+            if self._active_job is job:
+                self._active_job = None
 
     async def cancel_scan(self) -> bool:
-        self._cancel_requested = True
+        job = self._active_job
+        if job is None:
+            return False
+        job.cancelled = True
         return True
 
     async def scan_pdf(
@@ -806,24 +903,24 @@ class MockScannerBridge(ScannerBridge):
         output_format: str = "pdf",
     ) -> ScanResult:
         _ = source, device, timeout_sec, resolution_dpi
-        self._cancel_requested = False
-        await asyncio.sleep(_mock_delay(0.3))
-        if self._cancel_requested:
-            return ScanResult(ok=False, stdout=b"", stderr="cancelled", user_message="Cancelled")
-        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
-        if output_format.lower() in ("jpg", "jpeg"):
-            mode = "RGB" if color else "L"
-            bg = (245, 247, 250) if color else 245
-            img = Image.new(mode, (400, 600), color=bg)
-            draw = ImageDraw.Draw(img)
-            draw.text((24, 40), f"MOCK JPEG {ts}", fill=(20, 20, 20) if color else 20)
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=85)
-            return ScanResult(ok=True, stdout=buf.getvalue(), stderr="", user_message=None)
+        with self._job_scope() as job:
+            await asyncio.sleep(_mock_delay(0.3))
+            if job.cancelled:
+                return ScanResult(ok=False, stdout=b"", stderr="cancelled", user_message="Cancelled")
+            ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            if output_format.lower() in ("jpg", "jpeg"):
+                mode = "RGB" if color else "L"
+                bg = (245, 247, 250) if color else 245
+                img = Image.new(mode, (400, 600), color=bg)
+                draw = ImageDraw.Draw(img)
+                draw.text((24, 40), f"MOCK JPEG {ts}", fill=(20, 20, 20) if color else 20)
+                buf = io.BytesIO()
+                img.save(buf, format="JPEG", quality=85)
+                return ScanResult(ok=True, stdout=buf.getvalue(), stderr="", user_message=None)
 
-        body = f"MOCK SCAN {ts}{' (duplex)' if duplex else ''}"
-        pdf = _build_mock_pdf(body)
-        return ScanResult(ok=True, stdout=pdf, stderr="", user_message=None)
+            body = f"MOCK SCAN {ts}{' (duplex)' if duplex else ''}"
+            pdf = _build_mock_pdf(body)
+            return ScanResult(ok=True, stdout=pdf, stderr="", user_message=None)
 
     async def scan_copy_file(
         self,
@@ -841,33 +938,38 @@ class MockScannerBridge(ScannerBridge):
         timeout_sec: int = 300,
     ) -> ScanFileResult:
         _ = duplex, source, device, resolution_dpi, timeout_sec
-        self._cancel_requested = False
-        await asyncio.sleep(_mock_delay(0.2))
-        if self._cancel_requested:
-            return ScanFileResult(ok=False, path="", stderr="cancelled", user_message="Cancelled")
-        fd, file_path = tempfile.mkstemp(prefix="kopi-copy-mock-", suffix=".png")
-        os.close(fd)
-        mode = "RGB" if color else "L"
-        bg = (255, 255, 255) if color else 255
-        w_mm, h_mm = resolve_original_size_mm(original_size)
-        mock_px_w = max(100, round(w_mm * (600.0 / 210.0)))
-        mock_px_h = max(100, round(h_mm * (600.0 / 210.0)))
-        img = Image.new(mode, (mock_px_w, mock_px_h), color=bg)
-        draw = ImageDraw.Draw(img)
-        draw.text(
-            (40, 60),
-            f"MOCK COPY PAGE ({original_size})",
-            fill=(10, 10, 10) if color else 10,
-        )
-        img.save(file_path, format="PNG")
-        enhance_scanned_image_file(
-            Path(file_path),
-            lighter_darker=lighter_darker,
-            content_type=content_type,
-            resize_mode=resize_mode,
-            resize_percent=resize_percent,
-        )
-        return ScanFileResult(ok=True, path=file_path, stderr="", user_message=None)
+        with self._job_scope() as job:
+            await asyncio.sleep(_mock_delay(0.2))
+            if job.cancelled:
+                return ScanFileResult(ok=False, path="", stderr="cancelled", user_message="Cancelled")
+            fd, file_path = tempfile.mkstemp(prefix="kopi-copy-mock-", suffix=".png")
+            os.close(fd)
+            output = Path(file_path)
+            try:
+                mode = "RGB" if color else "L"
+                bg = (255, 255, 255) if color else 255
+                w_mm, h_mm = resolve_original_size_mm(original_size)
+                mock_px_w = max(100, round(w_mm * (600.0 / 210.0)))
+                mock_px_h = max(100, round(h_mm * (600.0 / 210.0)))
+                img = Image.new(mode, (mock_px_w, mock_px_h), color=bg)
+                draw = ImageDraw.Draw(img)
+                draw.text(
+                    (40, 60),
+                    f"MOCK COPY PAGE ({original_size})",
+                    fill=(10, 10, 10) if color else 10,
+                )
+                img.save(file_path, format="PNG")
+                enhance_scanned_image_file(
+                    output,
+                    lighter_darker=lighter_darker,
+                    content_type=content_type,
+                    resize_mode=resize_mode,
+                    resize_percent=resize_percent,
+                )
+            except BaseException:
+                output.unlink(missing_ok=True)
+                raise
+            return ScanFileResult(ok=True, path=file_path, stderr="", user_message=None)
 
     async def scan_id_side(
         self,
@@ -877,16 +979,16 @@ class MockScannerBridge(ScannerBridge):
         timeout_sec: int = 180,
     ) -> ScanFileResult:
         _ = device, timeout_sec
-        self._cancel_requested = False
-        await asyncio.sleep(_mock_delay(0.15))
-        if self._cancel_requested:
-            return ScanFileResult(ok=False, path="", stderr="cancelled", user_message="Cancelled")
-        fd, file_path = tempfile.mkstemp(prefix=f"kopi-id-{side_name}-", suffix=".png")
-        os.close(fd)
-        label = "FRONT" if "front" in side_name.lower() else "BACK"
-        rgb = (45, 106, 79) if label == "FRONT" else (29, 53, 87)
-        img = Image.new("RGB", (325, 204), color=rgb)
-        draw = ImageDraw.Draw(img)
-        draw.text((120, 90), label, fill=(255, 255, 255))
-        img.save(file_path, format="PNG")
-        return ScanFileResult(ok=True, path=file_path, stderr="", user_message=None)
+        with self._job_scope() as job:
+            await asyncio.sleep(_mock_delay(0.15))
+            if job.cancelled:
+                return ScanFileResult(ok=False, path="", stderr="cancelled", user_message="Cancelled")
+            fd, file_path = tempfile.mkstemp(prefix=f"kopi-id-{side_name}-", suffix=".png")
+            os.close(fd)
+            label = "FRONT" if "front" in side_name.lower() else "BACK"
+            rgb = (45, 106, 79) if label == "FRONT" else (29, 53, 87)
+            img = Image.new("RGB", (325, 204), color=rgb)
+            draw = ImageDraw.Draw(img)
+            draw.text((120, 90), label, fill=(255, 255, 255))
+            img.save(file_path, format="PNG")
+            return ScanFileResult(ok=True, path=file_path, stderr="", user_message=None)

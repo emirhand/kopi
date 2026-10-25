@@ -52,12 +52,18 @@ class IdScanStore:
                 except OSError:
                     pass
 
-    def _purge_unlocked(self) -> None:
+    def _purge_unlocked(self) -> int:
         now = time.monotonic()
         dead = [k for k, (exp, _) in self._data.items() if exp <= now]
         for k in dead:
             _exp, payload = self._data.pop(k)
             self._cleanup_payload(payload)
+        return len(dead)
+
+    async def purge_expired(self) -> int:
+        """Acquire lock and remove all expired ID-scan sessions and their temporary files."""
+        async with self._lock:
+            return self._purge_unlocked()
 
     async def create_session(self) -> str:
         sid = uuid.uuid4().hex
@@ -141,7 +147,13 @@ async def api_id_scan_front() -> dict[str, Any]:
     if not res.ok:
         await ID_SCAN_STORE.discard(sid)
         raise HTTPException(status_code=400, detail=res.user_message or "Scan failed")
-    if not await ID_SCAN_STORE.set_side(sid, "front", res.path):
+    try:
+        stored = await ID_SCAN_STORE.set_side(sid, "front", res.path)
+    except BaseException:
+        Path(res.path).unlink(missing_ok=True)
+        await ID_SCAN_STORE.discard(sid)
+        raise
+    if not stored:
         Path(res.path).unlink(missing_ok=True)
         await ID_SCAN_STORE.discard(sid)
         raise HTTPException(status_code=500, detail="Session error")
@@ -168,7 +180,12 @@ async def api_id_scan_back(body: IdScanSessionBody) -> dict[str, Any]:
 
     if not res.ok:
         raise HTTPException(status_code=400, detail=res.user_message or "Scan failed")
-    if not await ID_SCAN_STORE.set_side(body.session_id, "back", res.path):
+    try:
+        stored = await ID_SCAN_STORE.set_side(body.session_id, "back", res.path)
+    except BaseException:
+        Path(res.path).unlink(missing_ok=True)
+        raise
+    if not stored:
         Path(res.path).unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail="Session error")
     return {"ok": True}
@@ -186,31 +203,36 @@ async def api_id_scan_compose(body: IdScanSessionBody) -> dict[str, Any]:
     fd, tmp = tempfile.mkstemp(prefix="kopi-id-composed-", suffix=".pdf")
     os.close(fd)
     out_pdf = Path(tmp)
+    ocr_out: Path | None = None
+    stored_in_session = False
 
-    ok, err = compose_id_scans_to_a4_pdf(front, back, out_pdf)
-    if not ok:
-        out_pdf.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=err or "Compose failed")
+    try:
+        ok, err = compose_id_scans_to_a4_pdf(front, back, out_pdf)
+        if not ok:
+            raise HTTPException(status_code=400, detail=err or "Compose failed")
 
-    ocr_requested = bool(settings.id_scan_ocr)
-    ocr_applied = False
-    final_pdf = out_pdf
-    if ocr_requested:
-        fd2, tmp2 = tempfile.mkstemp(prefix="kopi-id-ocr-", suffix=".pdf")
-        os.close(fd2)
-        ocr_out = Path(tmp2)
-        ocr_ok, ocr_err = apply_ocrmypdf(out_pdf, ocr_out)
-        if not ocr_ok:
+        ocr_requested = bool(settings.id_scan_ocr)
+        ocr_applied = False
+        final_pdf = out_pdf
+        if ocr_requested:
+            fd2, tmp2 = tempfile.mkstemp(prefix="kopi-id-ocr-", suffix=".pdf")
+            os.close(fd2)
+            ocr_out = Path(tmp2)
+            ocr_ok, ocr_err = apply_ocrmypdf(out_pdf, ocr_out)
+            if not ocr_ok:
+                raise HTTPException(status_code=400, detail=ocr_err or "OCR failed")
             out_pdf.unlink(missing_ok=True)
-            ocr_out.unlink(missing_ok=True)
-            raise HTTPException(status_code=400, detail=ocr_err or "OCR failed")
-        out_pdf.unlink(missing_ok=True)
-        final_pdf = ocr_out
-        ocr_applied = True
+            final_pdf = ocr_out
+            ocr_applied = True
 
-    if not await ID_SCAN_STORE.set_side(body.session_id, "pdf", str(final_pdf)):
-        final_pdf.unlink(missing_ok=True)
-        raise HTTPException(status_code=500, detail="Session error")
+        if not await ID_SCAN_STORE.set_side(body.session_id, "pdf", str(final_pdf)):
+            raise HTTPException(status_code=500, detail="Session error")
+        stored_in_session = True
+    finally:
+        if not stored_in_session:
+            out_pdf.unlink(missing_ok=True)
+            if ocr_out is not None:
+                ocr_out.unlink(missing_ok=True)
 
     b64, prev_err = pdf_to_preview_png_base64(final_pdf)
     if b64 is None:
