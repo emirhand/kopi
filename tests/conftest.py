@@ -7,12 +7,14 @@ from pathlib import Path
 import pytest
 
 from kopi.auth.rate_limit import reset_auth_rate_limiter
+from kopi.config import reset_legacy_default_warnings
 
 
 @pytest.fixture(autouse=True)
 def _reset_rate_limiter() -> None:
-    """Ensure rate-limiter state is clean before each test."""
+    """Ensure rate-limiter and warning deduplication state are clean before each test."""
     reset_auth_rate_limiter()
+    reset_legacy_default_warnings()
 
 
 @pytest.fixture

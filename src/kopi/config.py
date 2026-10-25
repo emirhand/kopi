@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hmac
 import json
 import logging
@@ -9,10 +10,17 @@ import os
 import secrets
 import sys
 import tempfile
+import threading
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover
+    fcntl = None  # type: ignore[assignment]
 
 log = logging.getLogger("kopi.config")
 
@@ -21,6 +29,18 @@ LEGACY_DEFAULT_ADMIN_PASSWORD = "1234"
 LEGACY_DEFAULT_PAIRING_PIN = "0000"
 ADMIN_PASSWORD_DIGITS = 8
 PAIRING_PIN_DIGITS = 6
+
+_SETTINGS_THREAD_LOCK = threading.Lock()
+_warned_legacy_defaults: set[str] = set()
+
+
+class SettingsError(RuntimeError):
+    """Raised when settings.json or an external secret file is corrupt or unreadable."""
+
+
+def reset_legacy_default_warnings() -> None:
+    """Clear the per-process legacy-default warning deduplication state (for tests)."""
+    _warned_legacy_defaults.clear()
 
 
 class SmtpConfig(BaseModel):
@@ -73,20 +93,30 @@ def _generate_digits(length: int) -> str:
 
 
 def _read_secret_from_env(val_env: str, file_env: str) -> str | None:
-    """Resolve an external secret from `<NAME>_FILE` or `<NAME>`, or None if unset."""
+    """Resolve an external secret from `<NAME>_FILE` or `<NAME>`, or None if unset.
+
+    If `<NAME>_FILE` is set to a non-empty path, fails closed with `SettingsError`
+    when the target file is missing, unreadable, or empty/whitespace-only.
+    """
     file_path_raw = os.environ.get(file_env, "").strip()
     if file_path_raw:
+        secret_path = Path(file_path_raw)
         try:
-            content = Path(file_path_raw).read_text(encoding="utf-8").strip()
-            if content:
-                return content
-            log.warning("%s points to an empty file; falling through.", file_env)
+            raw_content = secret_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise SettingsError(
+                f"Secret file configured in {file_env} is missing ({secret_path})."
+            ) from exc
         except OSError as exc:
-            log.warning(
-                "Failed to read secret file specified by %s (%s); falling through.",
-                file_env,
-                exc.__class__.__name__,
+            raise SettingsError(
+                f"Secret file configured in {file_env} is unreadable ({exc.__class__.__name__})."
+            ) from exc
+        content = raw_content.strip()
+        if not content:
+            raise SettingsError(
+                f"Secret file configured in {file_env} is empty."
             )
+        return content
 
     direct_val = os.environ.get(val_env, "").strip()
     if direct_val:
@@ -113,15 +143,66 @@ def get_settings_path() -> Path:
     return repo_root / DEFAULT_SETTINGS_REL_PATH
 
 
-def _read_raw_settings_dict(target: Path) -> dict[str, Any]:
-    if not target.is_file():
-        return {}
+@contextlib.contextmanager
+def _settings_lock(target: Path) -> Iterator[None]:
+    """Serialize settings generation and read-merge-write across threads and processes."""
+    with _SETTINGS_THREAD_LOCK:
+        if fcntl is None:  # pragma: no cover
+            yield
+            return
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            lock_path = target.with_name(f"{target.name}.lock")
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            raise SettingsError(
+                f"Could not acquire lock for settings file {target} ({exc.__class__.__name__})."
+            ) from exc
+        try:
+            with contextlib.suppress(OSError):
+                os.fchmod(fd, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                with contextlib.suppress(OSError):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
+
+def _settings_file_error(target: Path, reason: str) -> SettingsError:
+    return SettingsError(
+        f"Settings file {target} is invalid or unreadable ({reason}). "
+        "The file was NOT modified; restore it from backup or remove it deliberately to start fresh."
+    )
+
+
+def _read_and_validate_settings(target: Path) -> tuple[dict[str, Any], KopiSettings]:
+    """Read and validate `target`, returning `({}, KopiSettings())` only when the file does not exist."""
     try:
-        with target.open("r", encoding="utf-8") as f:
-            raw_data = json.load(f)
-        return raw_data if isinstance(raw_data, dict) else {}
-    except (OSError, ValueError):
-        return {}
+        raw_text = target.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {}, KopiSettings()
+    except OSError as exc:
+        raise _settings_file_error(target, f"unreadable: {exc.__class__.__name__}") from exc
+
+    try:
+        raw_data = json.loads(raw_text)
+    except ValueError as exc:
+        raise _settings_file_error(target, "invalid JSON") from exc
+
+    if not isinstance(raw_data, dict):
+        raise _settings_file_error(
+            target, f"expected a JSON object, got {type(raw_data).__name__}"
+        )
+
+    try:
+        stored = KopiSettings.model_validate(raw_data)
+    except ValidationError as exc:
+        raise _settings_file_error(target, "schema validation failed") from exc
+
+    return raw_data, stored
 
 
 def _write_settings_dict_atomic(data: dict[str, Any], target: Path) -> None:
@@ -146,58 +227,69 @@ def _write_settings_dict_atomic(data: dict[str, Any], target: Path) -> None:
         raise
 
 
+def _warn_if_legacy_default(field_name: str, value: str, expected_legacy: str, target: Path) -> None:
+    if value == expected_legacy and field_name not in _warned_legacy_defaults:
+        _warned_legacy_defaults.add(field_name)
+        log.warning(
+            "Stored %s in %s matches the legacy default (%r); please rotate it.",
+            field_name,
+            target,
+            expected_legacy,
+        )
+
+
 def load_settings(path: Path | None = None) -> KopiSettings:
     """Load settings from disk, applying external overrides or generating first-run secrets."""
     target = path if path is not None else get_settings_path()
-    raw_data = _read_raw_settings_dict(target)
-    stored = KopiSettings.model_validate(raw_data) if raw_data else KopiSettings()
+    ext_admin_pw = _read_secret_from_env("KOPI_ADMIN_PASSWORD", "KOPI_ADMIN_PASSWORD_FILE")
+    ext_pairing_pin = _read_secret_from_env("KOPI_PAIRING_PIN", "KOPI_PAIRING_PIN_FILE")
+
+    _, stored = _read_and_validate_settings(target)
+    need_admin = ext_admin_pw is None and not stored.admin_password.strip()
+    need_pin = ext_pairing_pin is None and not stored.pairing_pin.strip()
+
+    if need_admin or need_pin:
+        with _settings_lock(target):
+            _, stored = _read_and_validate_settings(target)
+            generated: list[tuple[str, str]] = []
+
+            if ext_admin_pw is None and not stored.admin_password.strip():
+                stored.admin_password = _generate_digits(ADMIN_PASSWORD_DIGITS)
+                generated.append(("Admin PIN", stored.admin_password))
+
+            if ext_pairing_pin is None and not stored.pairing_pin.strip():
+                stored.pairing_pin = _generate_digits(PAIRING_PIN_DIGITS)
+                generated.append(("Pairing PIN", stored.pairing_pin))
+
+            if generated:
+                _write_settings_dict_atomic(stored.model_dump(mode="json"), target)
+                log.info(
+                    "Generated initial station credentials in %s (run 'kopi status --show-secrets' on the station).",
+                    target,
+                )
+                if sys.stdout.isatty():
+                    print(f"Kopi first-run credentials generated (saved to {target}):")
+                    for label, secret_val in generated:
+                        print(f"  {label}: {secret_val}")
 
     stored_admin_pw = stored.admin_password.strip()
     stored_pairing_pin = stored.pairing_pin.strip()
 
-    ext_admin_pw = _read_secret_from_env("KOPI_ADMIN_PASSWORD", "KOPI_ADMIN_PASSWORD_FILE")
-    ext_pairing_pin = _read_secret_from_env("KOPI_PAIRING_PIN", "KOPI_PAIRING_PIN_FILE")
-
-    generated: list[tuple[str, str]] = []
-
     if ext_admin_pw is not None:
         effective_admin_pw = ext_admin_pw
-    elif stored_admin_pw:
-        effective_admin_pw = stored_admin_pw
-        if stored_admin_pw == LEGACY_DEFAULT_ADMIN_PASSWORD:
-            log.warning(
-                "Stored admin_password in %s matches the legacy default ('1234'); please rotate it.",
-                target,
-            )
     else:
-        effective_admin_pw = _generate_digits(ADMIN_PASSWORD_DIGITS)
-        stored.admin_password = effective_admin_pw
-        generated.append(("Admin PIN", effective_admin_pw))
+        effective_admin_pw = stored_admin_pw
+        _warn_if_legacy_default(
+            "admin_password", effective_admin_pw, LEGACY_DEFAULT_ADMIN_PASSWORD, target
+        )
 
     if ext_pairing_pin is not None:
         effective_pairing_pin = ext_pairing_pin
-    elif stored_pairing_pin:
-        effective_pairing_pin = stored_pairing_pin
-        if stored_pairing_pin == LEGACY_DEFAULT_PAIRING_PIN:
-            log.warning(
-                "Stored pairing_pin in %s matches the legacy default ('0000'); please rotate it.",
-                target,
-            )
     else:
-        effective_pairing_pin = _generate_digits(PAIRING_PIN_DIGITS)
-        stored.pairing_pin = effective_pairing_pin
-        generated.append(("Pairing PIN", effective_pairing_pin))
-
-    if generated:
-        _write_settings_dict_atomic(stored.model_dump(mode="json"), target)
-        log.info(
-            "Generated initial station credentials in %s (run 'uv run kopi status --show-secrets' to view).",
-            target,
+        effective_pairing_pin = stored_pairing_pin
+        _warn_if_legacy_default(
+            "pairing_pin", effective_pairing_pin, LEGACY_DEFAULT_PAIRING_PIN, target
         )
-        if sys.stdout.isatty():
-            print(f"Kopi first-run credentials generated (saved to {target}):")
-            for label, secret_val in generated:
-                print(f"  {label}: {secret_val}")
 
     return stored.model_copy(
         update={
@@ -210,17 +302,21 @@ def load_settings(path: Path | None = None) -> KopiSettings:
 def save_settings(settings: KopiSettings, path: Path | None = None) -> None:
     """Atomically persist settings to disk (mode 0600), never writing external secret overrides."""
     target = path if path is not None else get_settings_path()
-    existing_raw = _read_raw_settings_dict(target)
-    data = settings.model_dump(mode="json")
+    admin_managed = is_admin_password_managed()
+    pin_managed = is_pairing_pin_managed()
 
-    if is_admin_password_managed():
-        disk_pw = existing_raw.get("admin_password", "")
-        data["admin_password"] = disk_pw if isinstance(disk_pw, str) else ""
-    if is_pairing_pin_managed():
-        disk_pin = existing_raw.get("pairing_pin", "")
-        data["pairing_pin"] = disk_pin if isinstance(disk_pin, str) else ""
+    with _settings_lock(target):
+        existing_raw, _ = _read_and_validate_settings(target)
+        data = settings.model_dump(mode="json")
 
-    _write_settings_dict_atomic(data, target)
+        if admin_managed:
+            disk_pw = existing_raw.get("admin_password", "")
+            data["admin_password"] = disk_pw if isinstance(disk_pw, str) else ""
+        if pin_managed:
+            disk_pin = existing_raw.get("pairing_pin", "")
+            data["pairing_pin"] = disk_pin if isinstance(disk_pin, str) else ""
+
+        _write_settings_dict_atomic(data, target)
 
 
 def verify_admin_password(settings: KopiSettings, password: str) -> bool:

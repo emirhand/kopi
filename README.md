@@ -119,8 +119,8 @@ uv run kopi print-setup-sheet
 
 ## Pairing and access
 
-1. On first run, if no credentials are stored or supplied via environment variables/secret files, Kopi generates a random numeric pairing PIN (6 digits) and admin PIN (8 digits) and persists them to `settings.json` (mode `0600`). Run `uv run kopi status --show-secrets` to inspect them.
-2. For headless or containerized deployments, you can supply credentials externally via `KOPI_ADMIN_PASSWORD_FILE` / `KOPI_PAIRING_PIN_FILE` (highest precedence) or `KOPI_ADMIN_PASSWORD` / `KOPI_PAIRING_PIN`. Externally managed secrets are never written to `settings.json` and cannot be modified through the admin API/UI.
+1. On first run, if no credentials are stored or supplied via environment variables/secret files, Kopi generates a random numeric pairing PIN (6 digits) and admin PIN (8 digits) and persists them to `settings.json` (mode `0600`). Run `uv run kopi status --show-secrets` (or `kopi status --show-secrets` on the station) to inspect them.
+2. For headless or containerized deployments, you can supply credentials externally via `KOPI_ADMIN_PASSWORD_FILE` / `KOPI_PAIRING_PIN_FILE` (highest precedence) or `KOPI_ADMIN_PASSWORD` / `KOPI_PAIRING_PIN`. Externally managed secrets are never written to `settings.json` and cannot be modified through the admin API/UI. If a `*_FILE` variable is set to a path that is missing, unreadable or empty, Kopi refuses to start (fails closed) rather than falling back.
 3. An unpaired station lets a tablet **claim** it by entering the pairing PIN.
 4. The backend issues a random token and stores only its SHA-256 hash. The tablet keeps the token in localStorage and in a long-lived HttpOnly cookie.
 5. Copy, scan, ID-scan and USB endpoints only accept the paired tablet's token. Anyone else gets 403.
@@ -132,6 +132,8 @@ The admin API uses the `X-Admin-Password` header.
 
 Settings live in `config/settings.json` at the repository root (created on first run or save with mode `0600`, gitignored). Override the path with `SETTINGS_PATH`. It holds the stored admin password and pairing PIN (unless externally managed), paired-device info, SMTP settings, scanner and printer selection, copy defaults and the ID-scan OCR flag.
 
+If `settings.json` exists on disk but is unreadable or contains corrupt/invalid JSON, Kopi refuses to start (and returns HTTP 503 if corruption occurs at runtime) without modifying the file. Restore the file from backup or remove it deliberately to start fresh.
+
 ### Environment variables
 
 | Variable | Default | Purpose |
@@ -142,9 +144,9 @@ Settings live in `config/settings.json` at the repository root (created on first
 | `KOPI_LOG_LEVEL` | `INFO` | Python log level. |
 | `SETTINGS_PATH` | `config/settings.json` | Settings file location. |
 | `KOPI_ADMIN_PASSWORD` | — | Override admin PIN/password without writing it to `settings.json`. |
-| `KOPI_ADMIN_PASSWORD_FILE` | — | Path to a file containing the admin PIN/password (overrides `KOPI_ADMIN_PASSWORD`). |
+| `KOPI_ADMIN_PASSWORD_FILE` | — | Path to a file containing the admin PIN/password (overrides `KOPI_ADMIN_PASSWORD`; fails closed if missing, unreadable or empty). |
 | `KOPI_PAIRING_PIN` | — | Override tablet pairing PIN without writing it to `settings.json`. |
-| `KOPI_PAIRING_PIN_FILE` | — | Path to a file containing the tablet pairing PIN (overrides `KOPI_PAIRING_PIN`). |
+| `KOPI_PAIRING_PIN_FILE` | — | Path to a file containing the tablet pairing PIN (overrides `KOPI_PAIRING_PIN`; fails closed if missing, unreadable or empty). |
 | `KOPI_PUBLIC_URL` | — | External station URL (e.g. `http://copier.local:8000`) used by `print-setup-sheet` and added to the CORS allowlist. |
 | `KOPI_REQUIRE_PAIRING` | `1` | Set `0` to allow unpaired access. |
 | `KOPI_FRONTEND_DIST` | `frontend/dist` | Built frontend directory. |

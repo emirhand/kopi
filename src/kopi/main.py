@@ -15,15 +15,16 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import uvicorn
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from kopi.api import admin, copy, hardware, id_scan, pairing, scan, usb_print
 from kopi.auth.dependencies import require_paired_client
 from kopi.auth.pairing import get_pairing_provider
 from kopi.config import (
+    SettingsError,
     get_settings_path,
     is_admin_password_managed,
     is_pairing_pin_managed,
@@ -137,7 +138,27 @@ async def _periodic_store_purge_loop(interval_sec: float) -> None:
 
 @contextlib.asynccontextmanager
 async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
-    load_settings()
+    settings_path = get_settings_path()
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    archive_dir = scan._get_archive_dir()
+    dist_dir = _resolve_frontend_dist()
+    log.info(
+        "kopi_paths settings_path=%s archive_dir=%s frontend_dist=%s",
+        settings_path,
+        archive_dir,
+        dist_dir,
+    )
+    if not dist_dir.is_dir() or not (dist_dir / "index.html").is_file():
+        log.warning(
+            "Frontend dist directory or index.html not found at %s; SPA will not be served.",
+            dist_dir,
+        )
+    try:
+        load_settings(settings_path)
+    except SettingsError as exc:
+        log.error("Failed to load station settings on startup: %s", exc)
+        raise
+
     raw_interval = os.environ.get("KOPI_PURGE_INTERVAL_SEC", "60").strip()
     try:
         interval = max(1.0, float(raw_interval))
@@ -155,22 +176,20 @@ async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     """Create and configure the Kopi FastAPI application instance."""
     setup_logging()
-    settings_path = get_settings_path()
-    settings_path.parent.mkdir(parents=True, exist_ok=True)
-    archive_dir = scan._get_archive_dir()
-    dist_dir = _resolve_frontend_dist()
-    log.info(
-        "kopi_paths settings_path=%s archive_dir=%s frontend_dist=%s",
-        settings_path,
-        archive_dir,
-        dist_dir,
-    )
     sweep_orphaned_temp_files()
     application = FastAPI(
         title="Kopi — Linux Smart Copier Appliance",
         version="0.1.0",
         lifespan=_app_lifespan,
     )
+
+    @application.exception_handler(SettingsError)
+    async def _handle_settings_error(_request: Request, exc: SettingsError) -> JSONResponse:
+        log.error("Station settings error during request: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={"detail": "Station settings are unavailable. Check the server logs."},
+        )
 
     application.add_middleware(
         CORSMiddleware,
@@ -189,6 +208,7 @@ def create_app() -> FastAPI:
     application.include_router(usb_print.router, dependencies=paired_deps)
     application.include_router(admin.router)
 
+    dist_dir = _resolve_frontend_dist()
     index_html = dist_dir / "index.html"
     if dist_dir.is_dir() and index_html.is_file():
         assets_dir = dist_dir / "assets"
@@ -211,11 +231,6 @@ def create_app() -> FastAPI:
             ):
                 return FileResponse(str(candidate))
             return FileResponse(str(index_html))
-    else:
-        log.warning(
-            "Frontend dist directory or index.html not found at %s; SPA will not be served.",
-            dist_dir,
-        )
 
     return application
 
@@ -225,10 +240,16 @@ app = create_app()
 
 
 def _cli_status(*, show_secrets: bool = False) -> None:
-    settings = load_settings()
+    try:
+        settings = load_settings()
+        pin_managed = is_pairing_pin_managed()
+        admin_managed = is_admin_password_managed()
+    except SettingsError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
     hostname = socket.gethostname()
-    pin_source = " (managed externally)" if is_pairing_pin_managed() else ""
-    admin_source = " (managed externally)" if is_admin_password_managed() else ""
+    pin_source = " (managed externally)" if pin_managed else ""
+    admin_source = " (managed externally)" if admin_managed else ""
     print(f"Kopi Station ({hostname})")
     print(f"  Settings file : {get_settings_path()}")
     if show_secrets:
@@ -243,12 +264,20 @@ def _cli_status(*, show_secrets: bool = False) -> None:
 
 
 def _cli_unpair() -> None:
-    get_pairing_provider().unpair()
+    try:
+        get_pairing_provider().unpair()
+    except SettingsError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
     print("Unpaired active tablet. Station is now ready for a new tablet to claim.")
 
 
 def _cli_setup_sheet() -> None:
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except SettingsError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from None
     hostname = socket.gethostname()
     port = int(os.environ.get("PORT", "8000"))
     station_url = _resolve_public_url() or f"http://{hostname}.local:{port}"

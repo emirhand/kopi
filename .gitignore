@@ -38,6 +38,8 @@ frontend/dist/
 *~
 
 config/settings.json
+config/settings.json.lock
+config/*.lock
 
 # AI assistant workspace files
 .antigravity/
