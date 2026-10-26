@@ -108,6 +108,15 @@ Then open `http://<station-host>:8000`. Print a setup sheet for the tablet with:
 uv run kopi print-setup-sheet
 ```
 
+### CLI
+
+| Command | Purpose |
+|---------|---------|
+| `uv run kopi` (or `serve`) | Start the server. |
+| `uv run kopi status [--show-secrets]` | Show settings path and paired device (pass `--show-secrets` to print the pairing and admin PINs). |
+| `uv run kopi unpair` | Release the paired tablet so a new one can claim the station. |
+| `uv run kopi print-setup-sheet` | Print tablet setup instructions (URL and PIN). |
+
 ## Container deployment (Podman + Quadlet)
 
 For headless appliance deployments (such as a Raspberry Pi running Podman and systemd), build and install the hardened Quadlet container service with:
@@ -117,15 +126,6 @@ sudo ./deploy/install.sh install
 ```
 
 See [`deploy/README.md`](deploy/README.md) for host requirements, update/rollback and uninstall commands, Podman secret injection, hardware passthrough, and the Raspberry Pi verification checklist.
-
-### CLI
-
-| Command | Purpose |
-|---------|---------|
-| `uv run kopi` (or `serve`) | Start the server. |
-| `uv run kopi status [--show-secrets]` | Show settings path and paired device (pass `--show-secrets` to print the pairing and admin PINs). |
-| `uv run kopi unpair` | Release the paired tablet so a new one can claim the station. |
-| `uv run kopi print-setup-sheet` | Print tablet setup instructions (URL and PIN). |
 
 ## Pairing and access
 

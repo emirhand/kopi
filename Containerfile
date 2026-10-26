@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 # Multi-stage Containerfile for Kopi (aarch64 & x86_64)
 
-ARG NODE_IMAGE=docker.io/library/node:20.19.2-bookworm-slim
-ARG PYTHON_IMAGE=docker.io/library/python:3.14.4-slim-bookworm
+ARG NODE_IMAGE=docker.io/library/node:22.23.4-trixie-slim
+ARG PYTHON_IMAGE=docker.io/library/python:3.14.4-slim-trixie
 ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.6
 
 # ---------------------------------------------------------------------------

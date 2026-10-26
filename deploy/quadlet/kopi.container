@@ -6,8 +6,10 @@
 
 [Unit]
 Description=Kopi — Linux Smart Copier Appliance
-Wants=network-online.target
-After=network-online.target cups.service
+# Bind-mounting /run/cups/cups.sock requires the socket to exist before Podman
+# starts the container; on Debian, CUPS is socket-activated via cups.socket.
+Wants=network-online.target cups.socket
+After=network-online.target cups.socket cups.service
 
 [Container]
 Image=localhost/kopi:local
@@ -28,6 +30,10 @@ Environment=CUPS_SERVER=/run/cups/cups.sock
 # Optional: mount the host Avahi daemon socket so sane-airscan can discover
 # network eSCL/WSD scanners advertised via mDNS/DNS-SD.
 # Volume=/run/avahi-daemon/socket:/run/avahi-daemon/socket
+
+# Optional (alternative to Avahi): mount a static sane-airscan configuration
+# file copied from deploy/airscan.conf.example to /etc/kopi/airscan.conf.
+# Volume=/etc/kopi/airscan.conf:/etc/sane.d/airscan.conf:ro
 
 # Optional: pass through USB bus devices for direct USB scanners (SANE).
 # Note: USB device nodes on the host are typically owned by root:scanner or
@@ -66,7 +72,9 @@ RunInit=true
 # Memory=1G
 # MemorySwap=1G
 
-# Container health check (stdlib urllib, no curl needed in the image)
+# Container health check (stdlib urllib, no curl needed in the image).
+# Note: if you override PORT (for example Environment=PORT=8080), update the
+# port in HealthCmd below to match.
 HealthCmd=python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
 HealthInterval=30s
 HealthTimeout=5s

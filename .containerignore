@@ -29,7 +29,6 @@ secrets/
 .env
 .env.*
 *.msmtprc
-*.lock
 *.log
 
 # Exclude tests, deployment scripts, and docs except README.md (needed by pyproject.toml)
