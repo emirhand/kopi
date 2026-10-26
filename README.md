@@ -108,6 +108,16 @@ Then open `http://<station-host>:8000`. Print a setup sheet for the tablet with:
 uv run kopi print-setup-sheet
 ```
 
+## Container deployment (Podman + Quadlet)
+
+For headless appliance deployments (such as a Raspberry Pi running Podman and systemd), build and install the hardened Quadlet container service with:
+
+```bash
+sudo ./deploy/install.sh install
+```
+
+See [`deploy/README.md`](deploy/README.md) for host requirements, update/rollback and uninstall commands, Podman secret injection, hardware passthrough, and the Raspberry Pi verification checklist.
+
 ### CLI
 
 | Command | Purpose |
@@ -157,6 +167,7 @@ If `settings.json` exists on disk but is unreadable or contains corrupt/invalid 
 | `SCAN_DEVICE` | — | Default SANE device, if none is chosen in the admin panel. |
 | `SCANIMAGE_EXTRA_ARGS` | — | Extra arguments for `scanimage`. |
 | `CUPS_DEST` | — | Default CUPS printer, if none is chosen in the admin panel. |
+| `CUPS_SERVER` | — | CUPS server hostname or UNIX socket path (e.g. `/run/cups/cups.sock`) honored by `lp`, `lpstat` and `cancel`. |
 | `KOPI_SCAN_BUSY_RETRIES` | `4` | Retries when the scanner reports busy. |
 | `KOPI_SCAN_BUSY_DELAY_SEC` | `3` | Delay between busy retries. |
 | `KOPI_VERBOSE_HARDWARE_ERRORS` | off | Show raw scanner errors in the UI. |

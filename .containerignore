@@ -1,0 +1,45 @@
+# Exclude version control, virtualenvs, and caches
+.git
+.gitignore
+.venv
+venv
+env
+build
+dist
+*.egg-info
+**/__pycache__
+*.py[cod]
+*$py.class
+.mypy_cache
+.ruff_cache
+.pytest_cache
+.coverage
+htmlcov
+
+# Exclude frontend build artifacts and node_modules (rebuilt in stage 1)
+frontend/node_modules
+frontend/dist
+*.tsbuildinfo
+
+# Exclude runtime state, settings, secrets, and archives
+config/
+data/
+backend/data/
+secrets/
+.env
+.env.*
+*.msmtprc
+*.lock
+*.log
+
+# Exclude tests, deployment scripts, and docs except README.md (needed by pyproject.toml)
+tests/
+deploy/
+*.md
+!README.md
+
+# Exclude editor, OS, and assistant files
+.DS_Store
+*.swp
+*~
+.antigravity/

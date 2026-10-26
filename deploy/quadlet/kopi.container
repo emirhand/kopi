@@ -1,0 +1,84 @@
+# /etc/containers/systemd/kopi.container
+# Rootful Podman Quadlet unit for the Kopi Smart Copier Station.
+# Requires Podman >= 4.4. After editing, run:
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart kopi.service
+
+[Unit]
+Description=Kopi — Linux Smart Copier Appliance
+Wants=network-online.target
+After=network-online.target cups.service
+
+[Container]
+Image=localhost/kopi:local
+ContainerName=kopi
+
+# Host networking is used so SANE/eSCL (mDNS) scanner discovery works without
+# NAT traversal and so socket.gethostname() matches the station's LAN hostname.
+Network=host
+
+# Persistent station state (settings.json, settings.json.lock, and scan archive).
+# Owned on the host by 10001:10001 (mode 0750).
+Volume=/var/lib/kopi:/data:Z
+
+# Talk to the host CUPS scheduler over its UNIX domain socket.
+Volume=/run/cups/cups.sock:/run/cups/cups.sock
+Environment=CUPS_SERVER=/run/cups/cups.sock
+
+# Optional: mount the host Avahi daemon socket so sane-airscan can discover
+# network eSCL/WSD scanners advertised via mDNS/DNS-SD.
+# Volume=/run/avahi-daemon/socket:/run/avahi-daemon/socket
+
+# Optional: pass through USB bus devices for direct USB scanners (SANE).
+# Note: USB device nodes on the host are typically owned by root:scanner or
+# root:lp (mode 0664). When enabling AddDevice, also add the matching numeric
+# host group GID via GroupAdd=<gid> so uid 10001 can open the USB device.
+# AddDevice=/dev/bus/usb
+# GroupAdd=scanner
+
+# Optional: run with synthetic mock scanner/printer hardware for testing.
+# Environment=KOPI_HARDWARE_MODE=mock
+
+# Optional: override the station URL printed on setup sheets and allowed by CORS.
+# Environment=KOPI_PUBLIC_URL=http://copier.local:8000
+
+# Optional: supply admin password and tablet pairing PIN via Podman secrets.
+# If omitted, Kopi generates random numeric credentials on first run and saves
+# them to /data/settings.json (inspect via: sudo podman exec kopi kopi status --show-secrets).
+# Secret=kopi_admin_password,type=mount,target=/run/secrets/kopi_admin_password,mode=0400,uid=10001,gid=10001
+# Secret=kopi_pairing_pin,type=mount,target=/run/secrets/kopi_pairing_pin,mode=0400,uid=10001,gid=10001
+# Environment=KOPI_ADMIN_PASSWORD_FILE=/run/secrets/kopi_admin_password
+# Environment=KOPI_PAIRING_PIN_FILE=/run/secrets/kopi_pairing_pin
+
+# Process and filesystem hardening
+User=10001
+Group=10001
+ReadOnly=true
+# Pending scan previews and multi-page 600 DPI ADF batches are staged in /tmp.
+# Increase size= if scanning large color batches on stations with ample RAM.
+Tmpfs=/tmp:rw,size=512m,mode=1777
+NoNewPrivileges=true
+DropCapability=ALL
+RunInit=true
+
+# Optional resource limits (tune for 2 GB+ Raspberry Pi hosts):
+# PidsLimit=256
+# Memory=1G
+# MemorySwap=1G
+
+# Container health check (stdlib urllib, no curl needed in the image)
+HealthCmd=python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"
+HealthInterval=30s
+HealthTimeout=5s
+HealthRetries=3
+HealthStartPeriod=20s
+# Uncomment on Podman >= 4.9 to automatically restart on health check failure:
+# HealthOnFailure=restart
+
+[Service]
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
