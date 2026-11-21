@@ -1,0 +1,33 @@
+# /etc/kopi/airscan.conf (mounted into the container at /etc/sane.d/airscan.conf)
+#
+# Static scanner configuration for sane-airscan when host mDNS/Avahi discovery
+# is unavailable or disabled.
+#
+# Usage:
+#   1. Copy this file to /etc/kopi/airscan.conf on the host (mode 0644).
+#   2. Replace the example IP address below with your multifunction printer's
+#      static LAN IP or reservable DHCP hostname.
+#   3. Uncomment `Volume=/etc/kopi/airscan.conf:/etc/sane.d/airscan.conf:ro`
+#      in /etc/containers/systemd/kopi.container, then run:
+#        sudo systemctl daemon-reload && sudo systemctl restart kopi.service
+#   4. Verify discovery with:
+#        sudo podman exec kopi scanimage -L
+#
+# How to find your scanner's URL:
+#   - Print a Network Configuration Page from the printer's front panel, or
+#     check your router's DHCP client list to find the printer's IPv4 address.
+#   - Most modern AirPrint / Mopria / eSCL scanners expose:
+#       http://<printer-ip>:80/eSCL   or   https://<printer-ip>:443/eSCL
+#   - On any machine with avahi-utils installed, you can also run:
+#       avahi-browse -rt _uscan._tcp
+#     and read the address, port, and `rs=` path (usually `eSCL`) from the output.
+
+[devices]
+# Format: "Display Name" = <URL>, <protocol>
+# Supported protocols: eSCL (default, recommended) or WSD.
+"HP OfficeJet Pro 9010" = http://192.168.1.50:80/eSCL, eSCL
+# "Office WSD Scanner" = http://192.168.1.51:5357/WSDScanner, WSD
+
+[options]
+# Disable mDNS/WSD auto-discovery when using only static entries above:
+discovery = disable
