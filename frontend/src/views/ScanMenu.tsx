@@ -19,6 +19,7 @@ export function ScanMenu() {
 
   const [enableUsbScan, setEnableUsbScan] = useState(true);
   const [enableEmailScan, setEnableEmailScan] = useState(true);
+  const [enableArchiveScan, setEnableArchiveScan] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
@@ -29,6 +30,7 @@ export function ScanMenu() {
         const data = await res.json();
         if (typeof data.enable_usb_scan === "boolean") setEnableUsbScan(data.enable_usb_scan);
         if (typeof data.enable_email_scan === "boolean") setEnableEmailScan(data.enable_email_scan);
+        if (typeof data.enable_archive_scan === "boolean") setEnableArchiveScan(data.enable_archive_scan);
       } catch {
         /* ignore */
       }
@@ -39,10 +41,14 @@ export function ScanMenu() {
   }, []);
 
   useEffect(() => {
-    if ((destination === "usb" && !enableUsbScan) || (destination === "email" && !enableEmailScan)) {
+    if (
+      (destination === "usb" && !enableUsbScan) ||
+      (destination === "email" && !enableEmailScan) ||
+      (destination === "archive" && !enableArchiveScan)
+    ) {
       nav("/scan", { replace: true });
     }
-  }, [destination, enableUsbScan, enableEmailScan, nav]);
+  }, [destination, enableUsbScan, enableEmailScan, enableArchiveScan, nav]);
 
   const ctrl = useScanController(destination);
 
@@ -53,6 +59,7 @@ export function ScanMenu() {
         onSelectDestination={(dest) => nav(`/scan/${dest}`)}
         enableUsbScan={enableUsbScan}
         enableEmailScan={enableEmailScan}
+        enableArchiveScan={enableArchiveScan}
       />
     );
   }

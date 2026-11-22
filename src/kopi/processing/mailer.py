@@ -8,9 +8,21 @@ import ssl
 from email.message import EmailMessage
 from typing import Any
 
-from kopi.config import SmtpConfig
+from kopi.config import SmtpConfig, normalize_allowed_domains
 
 log = logging.getLogger("kopi.processing.mailer")
+
+
+def is_email_domain_allowed(recipient: str, allowed_domains: list[str] | str) -> bool:
+    """Return True if `allowed_domains` is empty or `recipient`'s domain is in the allowlist."""
+    domains = normalize_allowed_domains(allowed_domains)
+    if not domains:
+        return True
+    clean = (recipient or "").strip().lower()
+    if "@" not in clean:
+        return False
+    domain = clean.rsplit("@", 1)[-1]
+    return domain in domains
 
 
 def _coerce_smtp_config(smtp: SmtpConfig | dict[str, Any]) -> SmtpConfig:
@@ -56,6 +68,13 @@ def send_attachments_email(
         return False, "SMTP host is not configured in Admin Settings"
     if not attachments:
         return False, "No attachments to send"
+    if not is_email_domain_allowed(recipient, cfg.allowed_domains):
+        return False, "Email address invalid (not an allowed domain)"
+
+    total_bytes = sum(len(payload) for _name, payload in attachments)
+    max_bytes = int(cfg.max_attachment_mb) * 1024 * 1024
+    if total_bytes > max_bytes:
+        return False, f"Total attachment size exceeds {cfg.max_attachment_mb} MB limit"
 
     sender = _sanitize_header_text(cfg.from_email or cfg.user or "kopi@localhost")
     clean_subject = _sanitize_header_text(subject) or "Scanned document from Kopi"

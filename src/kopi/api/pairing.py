@@ -74,7 +74,8 @@ async def api_pair_claim(
     response: Response,
 ) -> dict[str, Any]:
     provider = get_pairing_provider()
-    result = provider.claim(pin=body.pin, device_label=body.device_label)
+    client_ip = request.client.host if request.client else None
+    result = provider.claim(pin=body.pin, device_label=body.device_label, client_ip=client_ip)
     _set_device_cookie(response, request, result.token)
     return result.model_dump()
 
@@ -86,9 +87,11 @@ async def api_pair_replace(
     response: Response,
 ) -> dict[str, Any]:
     provider = get_pairing_provider()
+    client_ip = request.client.host if request.client else None
     result = provider.replace_with_admin(
         admin_password=body.admin_password,
         device_label=body.device_label,
+        client_ip=client_ip,
     )
     _set_device_cookie(response, request, result.token)
     return result.model_dump()

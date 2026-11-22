@@ -60,6 +60,7 @@ async def api_settings_public() -> dict[str, bool]:
     return {
         "enable_usb_scan": bool(settings.enable_usb_scan),
         "enable_email_scan": bool(settings.enable_email_scan),
+        "enable_archive_scan": bool(settings.enable_archive_scan),
     }
 
 

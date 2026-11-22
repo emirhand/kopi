@@ -21,6 +21,7 @@ from PIL import Image
 from pydantic import BaseModel, Field
 from pypdf import PdfReader, PdfWriter
 
+from kopi.audit import record_audit_event
 from kopi.config import CopyDefaultsConfig, load_settings, save_settings
 from kopi.hardware import (
     DuplexMode,
@@ -730,7 +731,9 @@ async def api_copy_id_print(body: IdCopySessionBody) -> dict[str, Any]:
         Path(pdf_path).unlink(missing_ok=True)
 
     if not result.ok:
+        record_audit_event("id_copy_print", outcome="error")
         raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
+    record_audit_event("id_copy_print", outcome="success")
     return {"ok": True, "message": "ID card sent to printer"}
 
 

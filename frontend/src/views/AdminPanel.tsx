@@ -13,6 +13,8 @@ type Smtp = {
   password: string;
   from_email: string;
   tls: boolean;
+  allowed_domains: string[];
+  max_attachment_mb: number;
 };
 
 const emptySmtp: Smtp = {
@@ -22,18 +24,28 @@ const emptySmtp: Smtp = {
   password: "",
   from_email: "",
   tls: true,
+  allowed_domains: [],
+  max_attachment_mb: 20,
 };
 
 export function AdminPanel() {
   const nav = useNavigate();
   const [smtp, setSmtp] = useState<Smtp>(emptySmtp);
   const [smtpPasswordSet, setSmtpPasswordSet] = useState(false);
+  const [smtpPasswordManaged, setSmtpPasswordManaged] = useState(false);
+  const [allowedDomainsText, setAllowedDomainsText] = useState("");
+  const [oktaEnabled, setOktaEnabled] = useState(false);
+  const [oktaDomain, setOktaDomain] = useState("");
+  const [oktaApiToken, setOktaApiToken] = useState("");
+  const [oktaTokenSet, setOktaTokenSet] = useState(false);
+  const [oktaTokenManaged, setOktaTokenManaged] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
   const [scannerDevice, setScannerDevice] = useState("");
   const [printerDevice, setPrinterDevice] = useState("");
   const [enableUsbScan, setEnableUsbScan] = useState(true);
   const [enableEmailScan, setEnableEmailScan] = useState(true);
+  const [enableArchiveScan, setEnableArchiveScan] = useState(true);
   const [pairingPin, setPairingPin] = useState("");
   const [pairingPinSet, setPairingPinSet] = useState(false);
   const [pairingPinManaged, setPairingPinManaged] = useState(false);
@@ -69,6 +81,9 @@ export function AdminPanel() {
           return;
         }
         const data: AdminSettingsResponse = await res.json();
+        const domains = Array.isArray(data.smtp?.allowed_domains)
+          ? data.smtp.allowed_domains.filter((d): d is string => typeof d === "string")
+          : [];
         setSmtp({
           host: typeof data.smtp?.host === "string" ? data.smtp.host : "",
           port: typeof data.smtp?.port === "number" ? data.smtp.port : 587,
@@ -76,12 +91,22 @@ export function AdminPanel() {
           password: "",
           from_email: typeof data.smtp?.from_email === "string" ? data.smtp.from_email : "",
           tls: typeof data.smtp?.tls === "boolean" ? data.smtp.tls : true,
+          allowed_domains: domains,
+          max_attachment_mb: typeof data.smtp?.max_attachment_mb === "number" ? data.smtp.max_attachment_mb : 20,
         });
+        setAllowedDomainsText(domains.join(", "));
         setSmtpPasswordSet(Boolean(data.smtp?.password_set));
+        setSmtpPasswordManaged(Boolean(data.smtp?.password_managed));
+        setOktaEnabled(Boolean(data.okta?.enabled));
+        setOktaDomain(typeof data.okta?.domain === "string" ? data.okta.domain : "");
+        setOktaApiToken("");
+        setOktaTokenSet(Boolean(data.okta?.api_token_set));
+        setOktaTokenManaged(Boolean(data.okta?.api_token_managed));
         setScannerDevice(typeof data.scanner_device === "string" ? data.scanner_device : "");
         setPrinterDevice(typeof data.printer_device === "string" ? data.printer_device : "");
         setEnableUsbScan(data.enable_usb_scan !== false);
         setEnableEmailScan(data.enable_email_scan !== false);
+        setEnableArchiveScan(data.enable_archive_scan !== false);
         setPairingPin("");
         setPairingPinSet(Boolean(data.pairing_pin_set));
         setPairingPinManaged(Boolean(data.pairing_pin_managed));
@@ -158,11 +183,23 @@ export function AdminPanel() {
           "X-Admin-Password": pw,
         },
         body: JSON.stringify({
-          smtp,
+          smtp: {
+            ...smtp,
+            allowed_domains: allowedDomainsText
+              .split(",")
+              .map((d) => d.trim().replace(/^@+/, "").toLowerCase())
+              .filter(Boolean),
+          },
+          okta: {
+            enabled: oktaEnabled,
+            domain: oktaDomain.trim(),
+            api_token: oktaTokenManaged ? "" : oktaApiToken.trim(),
+          },
           scanner_device: scannerDevice,
           printer_device: printerDevice,
           enable_usb_scan: enableUsbScan,
           enable_email_scan: enableEmailScan,
+          enable_archive_scan: enableArchiveScan,
           pairing_pin: newPin || undefined,
           new_admin_password: newAdminPw || undefined,
         }),
@@ -177,6 +214,10 @@ export function AdminPanel() {
       if (smtp.password) {
         setSmtpPasswordSet(true);
         setSmtp((s) => ({ ...s, password: "" }));
+      }
+      if (oktaApiToken.trim()) {
+        setOktaTokenSet(true);
+        setOktaApiToken("");
       }
       if (newPin) {
         setPairingPinSet(true);
@@ -335,7 +376,7 @@ export function AdminPanel() {
           </select>
         </label>
         <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">Scan features</h3>
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
           <KioskButton
             variant={enableUsbScan ? "primary" : "secondary"}
             className="w-full text-lg min-h-[3.5rem]"
@@ -349,6 +390,13 @@ export function AdminPanel() {
             onClick={() => setEnableEmailScan((v) => !v)}
           >
             Email Scan: {enableEmailScan ? "On" : "Off"}
+          </KioskButton>
+          <KioskButton
+            variant={enableArchiveScan ? "primary" : "secondary"}
+            className="w-full text-lg min-h-[3.5rem]"
+            onClick={() => setEnableArchiveScan((v) => !v)}
+          >
+            Archive Scan: {enableArchiveScan ? "On" : "Off"}
           </KioskButton>
         </div>
         <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">SMTP</h3>
@@ -385,7 +433,14 @@ export function AdminPanel() {
           <input
             className={`${field} mt-1`}
             type="password"
-            placeholder={smtpPasswordSet ? "Leave blank to keep current" : "Not set"}
+            disabled={smtpPasswordManaged}
+            placeholder={
+              smtpPasswordManaged
+                ? "Managed via environment / secret file"
+                : smtpPasswordSet
+                  ? "Leave blank to keep current"
+                  : "Not set"
+            }
             value={smtp.password}
             onChange={(e) => setSmtp((s) => ({ ...s, password: e.target.value }))}
             autoComplete="new-password"
@@ -407,6 +462,72 @@ export function AdminPanel() {
         >
           TLS: {smtp.tls ? "On" : "Off"}
         </KioskButton>
+        <label className="text-sm text-kiosk-muted">
+          Allowed Email Domains (comma-separated, blank = any)
+          <input
+            className={`${field} mt-1`}
+            placeholder="e.g. company.com, partner.org"
+            value={allowedDomainsText}
+            onChange={(e) => setAllowedDomainsText(e.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <label className="text-sm text-kiosk-muted">
+          Max Attachment Size (MB)
+          <input
+            className={`${field} mt-1`}
+            type="number"
+            min={1}
+            max={100}
+            inputMode="numeric"
+            value={smtp.max_attachment_mb}
+            onChange={(e) =>
+              setSmtp((s) => ({
+                ...s,
+                max_attachment_mb: Math.max(1, Math.min(100, Number(e.target.value) || 20)),
+              }))
+            }
+          />
+        </label>
+
+        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">
+          Okta Directory Verification (Scan-to-Email)
+        </h3>
+        <KioskButton
+          variant={oktaEnabled ? "primary" : "secondary"}
+          className="w-full text-lg min-h-[3.5rem]"
+          onClick={() => setOktaEnabled((v) => !v)}
+        >
+          Require Active Okta User: {oktaEnabled ? "On" : "Off"}
+        </KioskButton>
+        <label className="text-sm text-kiosk-muted">
+          Okta Domain
+          <input
+            className={`${field} mt-1`}
+            placeholder="https://company.okta.com"
+            value={oktaDomain}
+            onChange={(e) => setOktaDomain(e.target.value)}
+            autoComplete="off"
+          />
+        </label>
+        <label className="text-sm text-kiosk-muted">
+          Okta API Token (SSWS)
+          <input
+            className={`${field} mt-1`}
+            type="password"
+            disabled={oktaTokenManaged}
+            placeholder={
+              oktaTokenManaged
+                ? "Managed via environment / secret file"
+                : oktaTokenSet
+                  ? "Leave blank to keep current"
+                  : "Not set"
+            }
+            value={oktaApiToken}
+            onChange={(e) => setOktaApiToken(e.target.value)}
+            autoComplete="new-password"
+          />
+        </label>
       </div>
 
       <KioskButton variant="primary" className="shrink-0 w-full text-2xl" disabled={busy} onClick={save}>

@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
 from kopi.api.copy import SCAN_STORE
+from kopi.audit import record_audit_event
 from kopi.config import load_settings
 from kopi.hardware import (
     HardwareBusyError,
@@ -32,6 +33,7 @@ from kopi.hardware import (
     resolve_writable_usb_mount,
 )
 from kopi.processing import mailer
+from kopi.processing.okta import verify_okta_active_user
 from kopi.processing.pdf import remove_blank_pages_from_pdf
 
 log = logging.getLogger("kopi.api.scan")
@@ -408,6 +410,36 @@ async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
     settings = load_settings()
     if not settings.enable_email_scan:
         raise HTTPException(status_code=403, detail="Email scan is disabled in Admin settings")
+
+    recipient = body.recipient.strip()
+    recipient_domain = recipient.rsplit("@", 1)[-1].lower() if "@" in recipient else ""
+    if not mailer.is_email_domain_allowed(recipient, settings.smtp.allowed_domains):
+        record_audit_event(
+            "scan_email",
+            outcome="denied",
+            detail={"reason": "domain_not_allowed", "recipient_domain": recipient_domain},
+        )
+        raise HTTPException(
+            status_code=400,
+            detail="Email address invalid (not an allowed domain)",
+        )
+    if settings.okta.enabled:
+        okta_ok, okta_err = await verify_okta_active_user(
+            recipient,
+            domain=settings.okta.domain,
+            api_token=settings.okta.api_token,
+        )
+        if not okta_ok:
+            record_audit_event(
+                "scan_email",
+                outcome="denied",
+                detail={"reason": "okta_verification_failed", "recipient_domain": recipient_domain},
+            )
+            raise HTTPException(
+                status_code=403,
+                detail=okta_err or "Recipient is not an active Okta user",
+            )
+
     dpi = _dpi_from_resolution_label(body.resolution)
     fmt_norm = _normalize_scan_format(body.output_format)
 
@@ -451,8 +483,18 @@ async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
                 smtp=settings.smtp,
             )
         if not ok:
+            record_audit_event(
+                "scan_email",
+                outcome="error",
+                detail={"recipient_domain": recipient_domain},
+            )
             raise HTTPException(status_code=400, detail=err or "Failed to send email")
 
+    record_audit_event(
+        "scan_email",
+        outcome="success",
+        detail={"recipient_domain": recipient_domain, "files": len(filenames)},
+    )
     return {
         "ok": True,
         "filename": filenames[0],
@@ -507,8 +549,10 @@ async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)) ->
                 saved_paths.append(dest)
         except OSError as e:
             log.warning("scan_usb_write_failed mount=%s err=%s", mount, e)
+            record_audit_event("scan_usb", outcome="error")
             raise HTTPException(status_code=400, detail="Could not write to USB drive") from e
 
+    record_audit_event("scan_usb", outcome="success", detail={"files": len(filenames)})
     msg = (
         f"Saved to {saved_paths[0]}"
         if len(saved_paths) == 1
@@ -524,6 +568,8 @@ async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)) ->
 
 @router.post("/archive")
 async def api_scan_archive(body: ScanArchiveBody) -> dict[str, Any]:
+    if not load_settings().enable_archive_scan:
+        raise HTTPException(status_code=403, detail="Archive scan is disabled in Admin settings")
     dpi = _dpi_from_resolution_label(body.resolution)
     fmt_norm = _normalize_scan_format(body.output_format)
 
@@ -554,8 +600,10 @@ async def api_scan_archive(body: ScanArchiveBody) -> dict[str, Any]:
                 saved_paths.append(dest)
         except OSError as e:
             log.warning("scan_archive_write_failed dir=%s err=%s", archive_dir, e)
+            record_audit_event("scan_archive", outcome="error")
             raise HTTPException(status_code=400, detail="Could not write archive file") from e
 
+    record_audit_event("scan_archive", outcome="success", detail={"files": len(filenames)})
     msg = (
         f"Saved to {saved_paths[0]}"
         if len(saved_paths) == 1

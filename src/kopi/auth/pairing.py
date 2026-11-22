@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 
 from fastapi import HTTPException
 
+from kopi.audit import record_audit_event
 from kopi.auth.models import PairingClaimResult, PairingStatus
 from kopi.auth.rate_limit import get_auth_rate_limiter
 from kopi.config import (
@@ -49,7 +50,12 @@ class PairingProvider(ABC):
         """Return True if caller_token matches the currently paired device."""
 
     @abstractmethod
-    def claim(self, pin: str, device_label: str | None = None) -> PairingClaimResult:
+    def claim(
+        self,
+        pin: str,
+        device_label: str | None = None,
+        client_ip: str | None = None,
+    ) -> PairingClaimResult:
         """Pair a new device when the station is currently unpaired."""
 
     @abstractmethod
@@ -57,6 +63,7 @@ class PairingProvider(ABC):
         self,
         admin_password: str,
         device_label: str | None = None,
+        client_ip: str | None = None,
     ) -> PairingClaimResult:
         """Atomically revoke any existing tablet and pair the calling tablet using Admin PIN."""
 
@@ -113,9 +120,14 @@ class StaticPinPairingProvider(PairingProvider):
             paired_at=settings.paired_at if caller_matches else None,
         )
 
-    def claim(self, pin: str, device_label: str | None = None) -> PairingClaimResult:
+    def claim(
+        self,
+        pin: str,
+        device_label: str | None = None,
+        client_ip: str | None = None,
+    ) -> PairingClaimResult:
         limiter = get_auth_rate_limiter()
-        limiter.check(PAIRING_PIN_SCOPE)
+        limiter.check(PAIRING_PIN_SCOPE, client_ip)
         settings = load_settings()
         if (settings.paired_device_token_hash or "").strip():
             raise HTTPException(
@@ -126,24 +138,41 @@ class StaticPinPairingProvider(PairingProvider):
                 ),
             )
         if not verify_pairing_pin(settings, pin):
-            limiter.record_failure(PAIRING_PIN_SCOPE)
+            limiter.record_failure(PAIRING_PIN_SCOPE, client_ip)
+            record_audit_event("pair_claim", outcome="denied", client_ip=client_ip)
             raise HTTPException(status_code=403, detail="Invalid pairing PIN")
-        limiter.record_success(PAIRING_PIN_SCOPE)
-        return self._issue_pairing(settings, device_label)
+        limiter.record_success(PAIRING_PIN_SCOPE, client_ip)
+        res = self._issue_pairing(settings, device_label)
+        record_audit_event(
+            "pair_claim",
+            outcome="success",
+            client_ip=client_ip,
+            detail={"device_id": res.device_id},
+        )
+        return res
 
     def replace_with_admin(
         self,
         admin_password: str,
         device_label: str | None = None,
+        client_ip: str | None = None,
     ) -> PairingClaimResult:
         limiter = get_auth_rate_limiter()
-        limiter.check(ADMIN_AUTH_SCOPE)
+        limiter.check(ADMIN_AUTH_SCOPE, client_ip)
         settings = load_settings()
         if not verify_admin_password(settings, admin_password):
-            limiter.record_failure(ADMIN_AUTH_SCOPE)
+            limiter.record_failure(ADMIN_AUTH_SCOPE, client_ip)
+            record_audit_event("pair_replace", outcome="denied", client_ip=client_ip)
             raise HTTPException(status_code=403, detail="Invalid Admin PIN")
-        limiter.record_success(ADMIN_AUTH_SCOPE)
-        return self._issue_pairing(settings, device_label)
+        limiter.record_success(ADMIN_AUTH_SCOPE, client_ip)
+        res = self._issue_pairing(settings, device_label)
+        record_audit_event(
+            "pair_replace",
+            outcome="success",
+            client_ip=client_ip,
+            detail={"device_id": res.device_id},
+        )
+        return res
 
     def unpair(self) -> None:
         settings = load_settings()

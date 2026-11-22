@@ -17,6 +17,7 @@ from PIL import Image, ImageDraw
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
 
+from kopi.audit import record_audit_event
 from kopi.config import load_settings
 from kopi.hardware import (
     DuplexMode,
@@ -384,8 +385,10 @@ async def api_usb_print_file(body: UsbPrintBody) -> dict[str, Any]:
             temp_pdf.unlink(missing_ok=True)
 
     if not result.ok:
+        record_audit_event("usb_print", outcome="error", detail={"copies": body.copies})
         raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
 
+    record_audit_event("usb_print", outcome="success", detail={"copies": body.copies})
     return {
         "ok": True,
         "filename": target.name,

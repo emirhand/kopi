@@ -6,6 +6,7 @@ interface ScanDestinationSelectorProps {
   onSelectDestination: (destination: ScanDestination) => void;
   enableUsbScan?: boolean;
   enableEmailScan?: boolean;
+  enableArchiveScan?: boolean;
 }
 
 export function ScanDestinationSelector({
@@ -13,6 +14,7 @@ export function ScanDestinationSelector({
   onSelectDestination,
   enableUsbScan = true,
   enableEmailScan = true,
+  enableArchiveScan = true,
 }: ScanDestinationSelectorProps) {
   return (
     <div className="flex h-[100dvh] w-[100dvw] flex-col overflow-hidden bg-kiosk-industrial-bezel text-zinc-100">
@@ -71,20 +73,22 @@ export function ScanDestinationSelector({
           </KioskButton>
         )}
 
-        <KioskButton
-          layout="tile"
-          variant="industrial"
-          className="min-h-[9rem] md:min-h-[16rem]"
-          onClick={() => onSelectDestination("archive")}
-        >
-          <span className="text-3xl md:text-4xl">📁</span>
-          <span className="mt-2 block text-xl font-black uppercase tracking-wide md:text-2xl">
-            Scan to Archive
-          </span>
-          <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
-            Save scanned documents directly to the station archive folder
-          </span>
-        </KioskButton>
+        {enableArchiveScan && (
+          <KioskButton
+            layout="tile"
+            variant="industrial"
+            className="min-h-[9rem] md:min-h-[16rem]"
+            onClick={() => onSelectDestination("archive")}
+          >
+            <span className="text-3xl md:text-4xl">📁</span>
+            <span className="mt-2 block text-xl font-black uppercase tracking-wide md:text-2xl">
+              Scan to Archive
+            </span>
+            <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
+              Save scanned documents directly to the station archive folder
+            </span>
+          </KioskButton>
+        )}
       </main>
     </div>
   );

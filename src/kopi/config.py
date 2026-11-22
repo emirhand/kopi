@@ -43,6 +43,19 @@ def reset_legacy_default_warnings() -> None:
     _warned_legacy_defaults.clear()
 
 
+def normalize_allowed_domains(raw: str | list[str]) -> list[str]:
+    """Normalize a comma-separated string or list of email domains."""
+    items = raw.split(",") if isinstance(raw, str) else raw
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        dom = item.strip().lstrip("@").lower()
+        if dom and dom not in seen:
+            seen.add(dom)
+            result.append(dom)
+    return result
+
+
 class SmtpConfig(BaseModel):
     """Outbound SMTP configuration for scan-to-email workflows."""
 
@@ -52,6 +65,16 @@ class SmtpConfig(BaseModel):
     password: str = ""
     from_email: str = ""
     tls: bool = True
+    allowed_domains: list[str] = Field(default_factory=list)
+    max_attachment_mb: int = Field(default=20, ge=1, le=100)
+
+
+class OktaConfig(BaseModel):
+    """Okta directory verification configuration for Scan-to-Email."""
+
+    enabled: bool = False
+    domain: str = ""
+    api_token: str = ""
 
 
 class CopyDefaultsConfig(BaseModel):
@@ -84,7 +107,9 @@ class KopiSettings(BaseModel):
     printer_device: str = ""
     enable_usb_scan: bool = True
     enable_email_scan: bool = True
+    enable_archive_scan: bool = True
     smtp: SmtpConfig = Field(default_factory=SmtpConfig)
+    okta: OktaConfig = Field(default_factory=OktaConfig)
     copy_defaults: CopyDefaultsConfig = Field(default_factory=CopyDefaultsConfig)
 
 
@@ -133,6 +158,16 @@ def is_admin_password_managed() -> bool:
 def is_pairing_pin_managed() -> bool:
     """Return True if the pairing PIN is supplied via environment or secret file."""
     return _read_secret_from_env("KOPI_PAIRING_PIN", "KOPI_PAIRING_PIN_FILE") is not None
+
+
+def is_smtp_password_managed() -> bool:
+    """Return True if the SMTP password is supplied via environment or secret file."""
+    return _read_secret_from_env("KOPI_SMTP_PASSWORD", "KOPI_SMTP_PASSWORD_FILE") is not None
+
+
+def is_okta_token_managed() -> bool:
+    """Return True if the Okta API token is supplied via environment or secret file."""
+    return _read_secret_from_env("KOPI_OKTA_API_TOKEN", "KOPI_OKTA_API_TOKEN_FILE") is not None
 
 
 def get_settings_path() -> Path:
@@ -244,6 +279,8 @@ def load_settings(path: Path | None = None) -> KopiSettings:
     target = path if path is not None else get_settings_path()
     ext_admin_pw = _read_secret_from_env("KOPI_ADMIN_PASSWORD", "KOPI_ADMIN_PASSWORD_FILE")
     ext_pairing_pin = _read_secret_from_env("KOPI_PAIRING_PIN", "KOPI_PAIRING_PIN_FILE")
+    ext_smtp_pw = _read_secret_from_env("KOPI_SMTP_PASSWORD", "KOPI_SMTP_PASSWORD_FILE")
+    ext_okta_token = _read_secret_from_env("KOPI_OKTA_API_TOKEN", "KOPI_OKTA_API_TOKEN_FILE")
 
     _, stored = _read_and_validate_settings(target)
     need_admin = ext_admin_pw is None and not stored.admin_password.strip()
@@ -292,10 +329,23 @@ def load_settings(path: Path | None = None) -> KopiSettings:
             "pairing_pin", effective_pairing_pin, LEGACY_DEFAULT_PAIRING_PIN, target
         )
 
+    smtp_effective = (
+        stored.smtp.model_copy(update={"password": ext_smtp_pw})
+        if ext_smtp_pw is not None
+        else stored.smtp
+    )
+    okta_effective = (
+        stored.okta.model_copy(update={"api_token": ext_okta_token})
+        if ext_okta_token is not None
+        else stored.okta
+    )
+
     return stored.model_copy(
         update={
             "admin_password": effective_admin_pw,
             "pairing_pin": effective_pairing_pin,
+            "smtp": smtp_effective,
+            "okta": okta_effective,
         }
     )
 
@@ -305,6 +355,8 @@ def save_settings(settings: KopiSettings, path: Path | None = None) -> None:
     target = path if path is not None else get_settings_path()
     admin_managed = is_admin_password_managed()
     pin_managed = is_pairing_pin_managed()
+    smtp_managed = is_smtp_password_managed()
+    okta_managed = is_okta_token_managed()
 
     with _settings_lock(target):
         existing_raw, _ = _read_and_validate_settings(target)
@@ -316,6 +368,16 @@ def save_settings(settings: KopiSettings, path: Path | None = None) -> None:
         if pin_managed:
             disk_pin = existing_raw.get("pairing_pin", "")
             data["pairing_pin"] = disk_pin if isinstance(disk_pin, str) else ""
+        if smtp_managed:
+            existing_smtp = existing_raw.get("smtp")
+            disk_smtp_pw = existing_smtp.get("password", "") if isinstance(existing_smtp, dict) else ""
+            if isinstance(data.get("smtp"), dict):
+                data["smtp"]["password"] = disk_smtp_pw if isinstance(disk_smtp_pw, str) else ""
+        if okta_managed:
+            existing_okta = existing_raw.get("okta")
+            disk_okta_tok = existing_okta.get("api_token", "") if isinstance(existing_okta, dict) else ""
+            if isinstance(data.get("okta"), dict):
+                data["okta"]["api_token"] = disk_okta_tok if isinstance(disk_okta_tok, str) else ""
 
         _write_settings_dict_atomic(data, target)
 

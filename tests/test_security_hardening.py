@@ -123,7 +123,11 @@ async def test_usb_and_email_scan_toggles_and_temp_cleanup(
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         pub = await client.get("/api/settings/public")
         assert pub.status_code == 200
-        assert pub.json() == {"enable_usb_scan": False, "enable_email_scan": False}
+        assert pub.json() == {
+            "enable_usb_scan": False,
+            "enable_email_scan": False,
+            "enable_archive_scan": True,
+        }
 
         drives_res = await client.get("/api/scan/usb/drives")
         assert drives_res.status_code == 403
