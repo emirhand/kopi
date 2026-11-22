@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import smtplib
+import ssl
 from email.message import EmailMessage
 from typing import Any
 
 from kopi.config import SmtpConfig
+
+log = logging.getLogger("kopi.processing.mailer")
 
 
 def _coerce_smtp_config(smtp: SmtpConfig | dict[str, Any]) -> SmtpConfig:
@@ -73,17 +77,33 @@ def send_attachments_email(
         )
 
     try:
-        with smtplib.SMTP(host, int(cfg.port), timeout=timeout_sec) as server:
-            server.ehlo()
-            if cfg.tls:
-                server.starttls()
+        port = int(cfg.port)
+        if cfg.tls:
+            tls_context = ssl.create_default_context()
+            if port == 465:
+                with smtplib.SMTP_SSL(host, port, timeout=timeout_sec, context=tls_context) as server:
+                    server.ehlo()
+                    if cfg.user.strip():
+                        server.login(cfg.user.strip(), cfg.password)
+                    server.send_message(msg)
+            else:
+                with smtplib.SMTP(host, port, timeout=timeout_sec) as server:
+                    server.ehlo()
+                    server.starttls(context=tls_context)
+                    server.ehlo()
+                    if cfg.user.strip():
+                        server.login(cfg.user.strip(), cfg.password)
+                    server.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=timeout_sec) as server:
                 server.ehlo()
-            if cfg.user.strip():
-                server.login(cfg.user.strip(), cfg.password)
-            server.send_message(msg)
+                if cfg.user.strip():
+                    server.login(cfg.user.strip(), cfg.password)
+                server.send_message(msg)
         return True, None
     except Exception as e:
-        return False, f"SMTP error: {e}"
+        log.warning("smtp_send_failed host=%s port=%s err=%s", host, cfg.port, e)
+        return False, "Failed to send email. Check SMTP settings and server logs."
 
 
 def send_attachment_email(

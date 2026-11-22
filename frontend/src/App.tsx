@@ -4,8 +4,8 @@ import { apiUrl } from "./api";
 import { AdminLogin } from "./views/AdminLogin";
 import { AdminPanel } from "./views/AdminPanel";
 import { CopyMenu } from "./views/CopyMenu";
+import { IdCopyWizard } from "./views/copy/IdCopyWizard";
 import { Home } from "./views/Home";
-import { IdScanWizard } from "./views/IdScanWizard";
 import { PairDevice, PairingStatusData } from "./views/PairDevice";
 import { ScanMenu } from "./views/ScanMenu";
 import { UsbPrint } from "./views/UsbPrint";
@@ -51,11 +51,11 @@ export default function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/copy" element={<CopyMenu />} />
+          <Route path="/copy/id" element={<IdCopyWizard />} />
           <Route path="/copy/:mode" element={<CopyMenu />} />
           <Route path="/scan" element={<ScanMenu />} />
           <Route path="/scan/:destination" element={<ScanMenu />} />
           <Route path="/usb-print" element={<UsbPrint />} />
-          <Route path="/id-scan" element={<IdScanWizard />} />
           <Route path="/admin" element={<AdminLogin />} />
           <Route path="/admin/panel" element={<AdminPanel />} />
           <Route path="*" element={<Navigate to="/" replace />} />

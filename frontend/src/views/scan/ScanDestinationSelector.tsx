@@ -4,11 +4,15 @@ import type { ScanDestination } from "./scanTypes";
 interface ScanDestinationSelectorProps {
   onBack: () => void;
   onSelectDestination: (destination: ScanDestination) => void;
+  enableUsbScan?: boolean;
+  enableEmailScan?: boolean;
 }
 
 export function ScanDestinationSelector({
   onBack,
   onSelectDestination,
+  enableUsbScan = true,
+  enableEmailScan = true,
 }: ScanDestinationSelectorProps) {
   return (
     <div className="flex h-[100dvh] w-[100dvw] flex-col overflow-hidden bg-kiosk-industrial-bezel text-zinc-100">
@@ -33,35 +37,39 @@ export function ScanDestinationSelector({
       </header>
 
       <main className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col justify-center gap-4 p-4 md:grid md:grid-cols-3 md:items-stretch md:gap-6 md:p-8">
-        <KioskButton
-          layout="tile"
-          variant="industrial"
-          className="min-h-[9rem] md:min-h-[16rem]"
-          onClick={() => onSelectDestination("email")}
-        >
-          <span className="text-3xl md:text-4xl">📧</span>
-          <span className="mt-2 block text-xl font-black uppercase tracking-wide md:text-2xl">
-            Scan to Email
-          </span>
-          <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
-            Enter recipient address, preview pages, and send PDF or JPG via email
-          </span>
-        </KioskButton>
+        {enableEmailScan && (
+          <KioskButton
+            layout="tile"
+            variant="industrial"
+            className="min-h-[9rem] md:min-h-[16rem]"
+            onClick={() => onSelectDestination("email")}
+          >
+            <span className="text-3xl md:text-4xl">📧</span>
+            <span className="mt-2 block text-xl font-black uppercase tracking-wide md:text-2xl">
+              Scan to Email
+            </span>
+            <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
+              Enter recipient address, preview pages, and send PDF or JPG via email
+            </span>
+          </KioskButton>
+        )}
 
-        <KioskButton
-          layout="tile"
-          variant="industrial"
-          className="min-h-[9rem] md:min-h-[16rem]"
-          onClick={() => onSelectDestination("usb")}
-        >
-          <span className="text-3xl md:text-4xl">🔌</span>
-          <span className="mt-2 block text-xl font-black uppercase tracking-wide md:text-2xl">
-            Scan to USB
-          </span>
-          <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
-            Choose a connected USB flash drive and save scanned documents directly
-          </span>
-        </KioskButton>
+        {enableUsbScan && (
+          <KioskButton
+            layout="tile"
+            variant="industrial"
+            className="min-h-[9rem] md:min-h-[16rem]"
+            onClick={() => onSelectDestination("usb")}
+          >
+            <span className="text-3xl md:text-4xl">🔌</span>
+            <span className="mt-2 block text-xl font-black uppercase tracking-wide md:text-2xl">
+              Scan to USB
+            </span>
+            <span className="mt-1.5 block text-xs font-medium normal-case tracking-normal text-zinc-400">
+              Choose a connected USB flash drive and save scanned documents directly
+            </span>
+          </KioskButton>
+        )}
 
         <KioskButton
           layout="tile"

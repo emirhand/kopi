@@ -82,7 +82,8 @@ class KopiSettings(BaseModel):
     paired_device_token_hash: str | None = None
     scanner_device: str = ""
     printer_device: str = ""
-    id_scan_ocr: bool = False
+    enable_usb_scan: bool = True
+    enable_email_scan: bool = True
     smtp: SmtpConfig = Field(default_factory=SmtpConfig)
     copy_defaults: CopyDefaultsConfig = Field(default_factory=CopyDefaultsConfig)
 

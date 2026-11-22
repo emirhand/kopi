@@ -32,7 +32,8 @@ export function AdminPanel() {
   const [busy, setBusy] = useState(false);
   const [scannerDevice, setScannerDevice] = useState("");
   const [printerDevice, setPrinterDevice] = useState("");
-  const [idScanOcr, setIdScanOcr] = useState(false);
+  const [enableUsbScan, setEnableUsbScan] = useState(true);
+  const [enableEmailScan, setEnableEmailScan] = useState(true);
   const [pairingPin, setPairingPin] = useState("");
   const [pairingPinSet, setPairingPinSet] = useState(false);
   const [pairingPinManaged, setPairingPinManaged] = useState(false);
@@ -79,7 +80,8 @@ export function AdminPanel() {
         setSmtpPasswordSet(Boolean(data.smtp?.password_set));
         setScannerDevice(typeof data.scanner_device === "string" ? data.scanner_device : "");
         setPrinterDevice(typeof data.printer_device === "string" ? data.printer_device : "");
-        setIdScanOcr(Boolean(data.id_scan_ocr));
+        setEnableUsbScan(data.enable_usb_scan !== false);
+        setEnableEmailScan(data.enable_email_scan !== false);
         setPairingPin("");
         setPairingPinSet(Boolean(data.pairing_pin_set));
         setPairingPinManaged(Boolean(data.pairing_pin_managed));
@@ -159,7 +161,8 @@ export function AdminPanel() {
           smtp,
           scanner_device: scannerDevice,
           printer_device: printerDevice,
-          id_scan_ocr: idScanOcr,
+          enable_usb_scan: enableUsbScan,
+          enable_email_scan: enableEmailScan,
           pairing_pin: newPin || undefined,
           new_admin_password: newAdminPw || undefined,
         }),
@@ -331,14 +334,23 @@ export function AdminPanel() {
             ))}
           </select>
         </label>
-        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">ID scan</h3>
-        <KioskButton
-          variant={idScanOcr ? "primary" : "secondary"}
-          className="w-full text-lg min-h-[3.5rem]"
-          onClick={() => setIdScanOcr((v) => !v)}
-        >
-          ID Scan OCR (ocrmypdf): {idScanOcr ? "On" : "Off"}
-        </KioskButton>
+        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">Scan features</h3>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <KioskButton
+            variant={enableUsbScan ? "primary" : "secondary"}
+            className="w-full text-lg min-h-[3.5rem]"
+            onClick={() => setEnableUsbScan((v) => !v)}
+          >
+            USB Scan: {enableUsbScan ? "On" : "Off"}
+          </KioskButton>
+          <KioskButton
+            variant={enableEmailScan ? "primary" : "secondary"}
+            className="w-full text-lg min-h-[3.5rem]"
+            onClick={() => setEnableEmailScan((v) => !v)}
+          >
+            Email Scan: {enableEmailScan ? "On" : "Off"}
+          </KioskButton>
+        </div>
         <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">SMTP</h3>
         <label className="text-sm text-kiosk-muted">
           Server

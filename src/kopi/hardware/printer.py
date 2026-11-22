@@ -50,6 +50,22 @@ def _resolve_duplex_option(duplex: bool | DuplexMode) -> str | None:
     return None
 
 
+_ALLOWED_PAPER_SIZES: Final[dict[str, str]] = {
+    "a4": "A4",
+    "letter": "Letter",
+    "legal": "Legal",
+    "a5": "A5",
+    "a3": "A3",
+    "4x6": "4x6",
+    "5x7": "5x7",
+    "executive": "Executive",
+}
+_ALLOWED_RESIZE_MODES: Final[frozenset[str]] = frozenset(
+    {"actual", "fit_to_page", "two_on_one", "full_page_91", "custom"}
+)
+_ALLOWED_QUALITIES: Final[frozenset[str]] = frozenset({"draft", "normal", "best"})
+
+
 def build_lp_cmd(
     file_path: str,
     *,
@@ -83,17 +99,25 @@ def build_lp_cmd(
         cmd.extend(["-o", "ColorModel=Gray"])
 
     if paper_size and paper_size.strip():
-        cmd.extend(["-o", f"media={paper_size.strip()}"])
+        ps_key = paper_size.strip().lower()
+        canonical_ps = _ALLOWED_PAPER_SIZES.get(ps_key)
+        if canonical_ps is None:
+            raise ValueError(f"Unsupported paper_size: {paper_size!r}")
+        cmd.extend(["-o", f"media={canonical_ps}"])
 
-    if resize_mode:
+    if resize_mode and resize_mode.strip():
         rmode = resize_mode.strip().lower()
+        if rmode not in _ALLOWED_RESIZE_MODES:
+            raise ValueError(f"Unsupported resize_mode: {resize_mode!r}")
         if rmode == "fit_to_page":
             cmd.extend(["-o", "fit-to-page"])
         elif rmode == "two_on_one":
             cmd.extend(["-o", "number-up=2"])
 
-    if quality:
+    if quality and quality.strip():
         q = quality.strip().lower()
+        if q not in _ALLOWED_QUALITIES:
+            raise ValueError(f"Unsupported quality: {quality!r}")
         if q == "draft":
             cmd.extend(["-o", "print-quality=3"])
         elif q == "normal":
@@ -302,9 +326,15 @@ class RealPrinterBridge(PrinterBridge):
         out_text = (stdout or b"").decode(errors="replace")
         err_text = (stderr or b"").decode(errors="replace")
         if proc.returncode != 0:
+            log.warning(
+                "print_failed rc=%s dest=%s stderr=%s",
+                proc.returncode,
+                dest,
+                err_text.strip(),
+            )
             msg = (
                 classify_print_error(err_text)
-                or f"Print error: {err_text.strip() or proc.returncode}"
+                or "Print failed. Check printer status and server logs."
             )
             return PrintResult(
                 ok=False,

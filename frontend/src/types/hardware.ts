@@ -28,7 +28,8 @@ export type AdminSettingsResponse = {
   };
   scanner_device?: string;
   printer_device?: string;
-  id_scan_ocr?: boolean;
+  enable_usb_scan?: boolean;
+  enable_email_scan?: boolean;
   pairing_pin_set?: boolean;
   pairing_pin_managed?: boolean;
   admin_password_managed?: boolean;

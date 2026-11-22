@@ -69,7 +69,8 @@ async def test_admin_verify_and_settings_crud(app: FastAPI) -> None:
             },
             "scanner_device": "hpaio:/usb/HP_OfficeJet_Pro_9010_series?serial=EXAMPLE123",
             "printer_device": "HP_OfficeJet_Pro_9010",
-            "id_scan_ocr": True,
+            "enable_usb_scan": False,
+            "enable_email_scan": False,
         }
         res_put = await client.put(
             "/api/admin/settings",
@@ -89,7 +90,8 @@ async def test_admin_verify_and_settings_crud(app: FastAPI) -> None:
             == "hpaio:/usb/HP_OfficeJet_Pro_9010_series?serial=EXAMPLE123"
         )
         assert updated["printer_device"] == "HP_OfficeJet_Pro_9010"
-        assert updated["id_scan_ocr"] is True
+        assert updated["enable_usb_scan"] is False
+        assert updated["enable_email_scan"] is False
         assert "password" not in updated["smtp"]
         assert updated["smtp"]["password_set"] is True
         assert "pairing_pin" not in updated

@@ -111,8 +111,8 @@ def test_mailer_validation_and_mock_smtp(monkeypatch: pytest.MonkeyPatch) -> Non
         def ehlo(self) -> None:
             pass
 
-        def starttls(self) -> None:
-            pass
+        def starttls(self, *, context: object = None) -> None:
+            _ = context
 
         def login(self, user: str, password: str) -> None:
             _ = user, password

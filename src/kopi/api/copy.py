@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import AsyncIterator, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import img2pdf
 from fastapi import APIRouter, HTTPException
@@ -29,6 +29,10 @@ from kopi.hardware import (
     get_hardware_lock,
     get_printer,
     get_scanner,
+)
+from kopi.processing.id_card import (
+    compose_id_scans_to_a4_pdf,
+    pdf_to_preview_png_base64,
 )
 
 log = logging.getLogger("kopi.api.copy")
@@ -154,6 +158,13 @@ class ScanStore:
 SCAN_STORE = ScanStore(SCAN_TTL_SEC)
 
 
+PaperSizeLiteral = Literal["A4", "Letter", "Legal", "A5", "A3", "4x6", "5x7", "Executive"]
+ResizeModeLiteral = Literal["actual", "fit_to_page", "two_on_one", "full_page_91", "custom"]
+QualityLiteral = Literal["draft", "normal", "best"]
+PageFlipLiteral = Literal["long_edge", "short_edge"]
+ContentTypeLiteral = Literal["mixed", "text", "photo"]
+
+
 class ScanBody(BaseModel):
     duplex: bool = False
     color: bool = True
@@ -161,8 +172,8 @@ class ScanBody(BaseModel):
     source: ScanSource = ScanSource.AUTO
     original_size: str = "A4"
     lighter_darker: int = Field(default=0, ge=-4, le=4)
-    content_type: str = "mixed"
-    resize_mode: str = "actual"
+    content_type: ContentTypeLiteral = "mixed"
+    resize_mode: ResizeModeLiteral = "actual"
     resize_percent: int = Field(default=100, ge=25, le=400)
     append_to_scan_id: str | None = None
 
@@ -171,12 +182,12 @@ class PrintBody(BaseModel):
     scan_id: str = Field(..., min_length=8)
     copies: int = Field(default=1, ge=1, le=99)
     duplex: bool | DuplexMode = False
-    page_flip: str = "long_edge"
+    page_flip: PageFlipLiteral = "long_edge"
     color: bool = True
-    paper_size: str | None = Field(default="A4")
+    paper_size: PaperSizeLiteral | None = Field(default="A4")
     collate: bool | None = True
-    resize_mode: str | None = "actual"
-    quality: str | None = "normal"
+    resize_mode: ResizeModeLiteral | None = "actual"
+    quality: QualityLiteral | None = "normal"
 
 
 class CopyBody(BaseModel):
@@ -184,18 +195,18 @@ class CopyBody(BaseModel):
     duplex: bool | DuplexMode = False
     scan_duplex: bool | None = None
     print_duplex: bool | DuplexMode | None = None
-    page_flip: str = "long_edge"
+    page_flip: PageFlipLiteral = "long_edge"
     color: bool = True
     resolution_dpi: int = Field(default=300, ge=72, le=600)
     source: ScanSource = ScanSource.AUTO
     original_size: str = "A4"
-    paper_size: str | None = Field(default="A4")
+    paper_size: PaperSizeLiteral | None = Field(default="A4")
     lighter_darker: int = Field(default=0, ge=-4, le=4)
-    content_type: str = "mixed"
-    resize_mode: str = "actual"
+    content_type: ContentTypeLiteral = "mixed"
+    resize_mode: ResizeModeLiteral = "actual"
     resize_percent: int = Field(default=100, ge=25, le=400)
     collate: bool | None = True
-    quality: str | None = "normal"
+    quality: QualityLiteral | None = "normal"
 
 
 def _is_duplex_requested(duplex: bool | DuplexMode) -> bool:
@@ -310,7 +321,8 @@ async def get_copy_preview(scan_id: str, page: int = 0) -> Response:
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=500, detail=f"Preview render error: {e}") from e
+            log.warning("copy_preview_render_failed scan_id=%s err=%s", scan_id, e)
+            raise HTTPException(status_code=500, detail="Preview render error") from e
 
     if page < 0 or page >= len(paths):
         raise HTTPException(status_code=404, detail="Page index out of range")
@@ -390,7 +402,8 @@ async def api_print(body: PrintBody) -> dict[str, Any]:
                 except HTTPException:
                     raise
                 except Exception as e:
-                    raise HTTPException(status_code=400, detail=f"PDF assembly error: {e}") from e
+                    log.warning("copy_pdf_assembly_failed scan_id=%s err=%s", body.scan_id, e)
+                    raise HTTPException(status_code=400, detail="PDF assembly error") from e
 
             effective_duplex = _resolve_print_duplex(body.duplex, body.page_flip)
             lock = get_hardware_lock()
@@ -496,3 +509,232 @@ async def api_copy(body: CopyBody) -> dict[str, Any]:
         "job_id": result.job_id,
         "destination": result.destination,
     }
+
+
+# ---------------------------------------------------------------------------
+# ID Card Copy (2-sided ID -> single A4 print, no email/OCR, immediate cleanup)
+# ---------------------------------------------------------------------------
+
+
+class IdCopyStore:
+    """Ephemeral session state for two-sided ID Card Copy -> one A4 print."""
+
+    def __init__(self, ttl_sec: int) -> None:
+        self._ttl_sec = ttl_sec
+        self._lock = asyncio.Lock()
+        self._data: dict[str, tuple[float, dict[str, str | None]]] = {}
+
+    @staticmethod
+    def _cleanup_payload(payload: dict[str, str | None]) -> None:
+        _unlink_paths(str(p) for p in payload.values() if p)
+
+    def _purge_unlocked(self) -> int:
+        now = time.monotonic()
+        dead = [k for k, (exp, _) in self._data.items() if exp <= now]
+        for k in dead:
+            _exp, payload = self._data.pop(k)
+            self._cleanup_payload(payload)
+        return len(dead)
+
+    async def purge_expired(self) -> int:
+        async with self._lock:
+            return self._purge_unlocked()
+
+    async def create_with_front(self, front_path: str) -> str:
+        sid = uuid.uuid4().hex
+        exp = time.monotonic() + self._ttl_sec
+        async with self._lock:
+            self._purge_unlocked()
+            self._data[sid] = (exp, {"front": front_path, "back": None, "pdf": None})
+        return sid
+
+    async def set_back(self, session_id: str, back_path: str) -> bool:
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.get(session_id)
+            if not item:
+                return False
+            _, payload = item
+            old = payload.get("back")
+            if old and old != back_path:
+                _unlink_paths([old])
+            payload["back"] = back_path
+            self._data[session_id] = (time.monotonic() + self._ttl_sec, payload)
+            return True
+
+    async def get_front_back(self, session_id: str) -> tuple[str, str] | None:
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.get(session_id)
+            if not item:
+                return None
+            _, payload = item
+            front = payload.get("front")
+            back = payload.get("back")
+            if not front or not back:
+                return None
+            return front, back
+
+    async def set_composed_pdf(self, session_id: str, pdf_path: str) -> None:
+        """Store composed PDF and immediately unlink front/back source images."""
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.get(session_id)
+            if not item:
+                _unlink_paths([pdf_path])
+                return
+            _, payload = item
+            to_unlink = [
+                str(payload.get(k))
+                for k in ("front", "back", "pdf")
+                if payload.get(k) and payload.get(k) != pdf_path
+            ]
+            _unlink_paths(to_unlink)
+            payload["front"] = None
+            payload["back"] = None
+            payload["pdf"] = pdf_path
+            self._data[session_id] = (time.monotonic() + self._ttl_sec, payload)
+
+    async def pop_pdf(self, session_id: str) -> str | None:
+        async with self._lock:
+            self._purge_unlocked()
+            item = self._data.pop(session_id, None)
+            if not item:
+                return None
+            _, payload = item
+            pdf = payload.get("pdf")
+            for k in ("front", "back"):
+                if payload.get(k):
+                    _unlink_paths([str(payload[k])])
+            return pdf
+
+    async def discard(self, session_id: str) -> None:
+        async with self._lock:
+            item = self._data.pop(session_id, None)
+        if item is not None:
+            self._cleanup_payload(item[1])
+
+
+ID_COPY_STORE = IdCopyStore(SCAN_TTL_SEC)
+
+
+class IdCopySessionBody(BaseModel):
+    session_id: str = Field(..., min_length=8)
+
+
+@router.post("/copy/id/front")
+async def api_copy_id_front() -> dict[str, Any]:
+    settings = load_settings()
+    lock = get_hardware_lock()
+    try:
+        async with lock.acquire("id-copy-front", wait=False):
+            res = await get_scanner().scan_id_side(
+                "front",
+                device=settings.scanner_device.strip() or None,
+            )
+    except HardwareBusyError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    if not res.ok:
+        if res.path:
+            Path(res.path).unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=res.user_message or "Front scan failed")
+    if not res.path:
+        raise HTTPException(status_code=500, detail="Front scan returned no file")
+    sid = await ID_COPY_STORE.create_with_front(res.path)
+    return {"ok": True, "session_id": sid}
+
+
+@router.post("/copy/id/back")
+async def api_copy_id_back(body: IdCopySessionBody) -> dict[str, Any]:
+    settings = load_settings()
+    lock = get_hardware_lock()
+    try:
+        async with lock.acquire("id-copy-back", wait=False):
+            res = await get_scanner().scan_id_side(
+                "back",
+                device=settings.scanner_device.strip() or None,
+            )
+    except HardwareBusyError as e:
+        raise HTTPException(status_code=409, detail=str(e)) from e
+    if not res.ok:
+        if res.path:
+            Path(res.path).unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail=res.user_message or "Back scan failed")
+    if not res.path:
+        raise HTTPException(status_code=500, detail="Back scan returned no file")
+    ok = await ID_COPY_STORE.set_back(body.session_id.strip(), res.path)
+    if not ok:
+        Path(res.path).unlink(missing_ok=True)
+        raise HTTPException(status_code=400, detail="ID copy session expired or not found")
+    return {"ok": True, "session_id": body.session_id}
+
+
+@router.post("/copy/id/compose")
+async def api_copy_id_compose(body: IdCopySessionBody) -> dict[str, Any]:
+    sid = body.session_id.strip()
+    pair = await ID_COPY_STORE.get_front_back(sid)
+    if not pair:
+        raise HTTPException(status_code=400, detail="Scan both front and back of the ID first")
+    front, back = pair
+
+    fd, tmp = tempfile.mkstemp(prefix="kopi-id-composed-", suffix=".pdf")
+    os.close(fd)
+    out_pdf = Path(tmp)
+    try:
+        ok, err = compose_id_scans_to_a4_pdf(Path(front), Path(back), out_pdf)
+        if not ok:
+            out_pdf.unlink(missing_ok=True)
+            log.warning("id_copy_compose_failed err=%s", err)
+            raise HTTPException(status_code=400, detail="Failed to compose ID card layout")
+
+        await ID_COPY_STORE.set_composed_pdf(sid, str(out_pdf))
+        preview_b64, prev_err = pdf_to_preview_png_base64(out_pdf)
+        if prev_err:
+            log.warning("id_copy_preview_failed err=%s", prev_err)
+    except HTTPException:
+        raise
+    except Exception as e:
+        out_pdf.unlink(missing_ok=True)
+        log.warning("id_copy_compose_exception err=%s", e)
+        raise HTTPException(status_code=500, detail="Failed to compose ID card") from e
+
+    return {
+        "ok": True,
+        "session_id": sid,
+        "preview_png_base64": preview_b64,
+    }
+
+
+@router.post("/copy/id/print")
+async def api_copy_id_print(body: IdCopySessionBody) -> dict[str, Any]:
+    sid = body.session_id.strip()
+    pdf_path = await ID_COPY_STORE.pop_pdf(sid)
+    if not pdf_path or not Path(pdf_path).is_file():
+        raise HTTPException(status_code=400, detail="Composed ID card not found or expired")
+
+    settings = load_settings()
+    lock = get_hardware_lock()
+    try:
+        try:
+            async with lock.acquire("id-copy-print", wait=False):
+                result = await get_printer().print_file(
+                    pdf_path,
+                    copies=1,
+                    duplex=False,
+                    job_name="kopi-id-copy",
+                    device=settings.printer_device.strip() or None,
+                )
+        except HardwareBusyError as e:
+            raise HTTPException(status_code=409, detail=str(e)) from e
+    finally:
+        Path(pdf_path).unlink(missing_ok=True)
+
+    if not result.ok:
+        raise HTTPException(status_code=400, detail=result.user_message or "Print failed")
+    return {"ok": True, "message": "ID card sent to printer"}
+
+
+@router.post("/copy/id/discard")
+async def api_copy_id_discard(body: IdCopySessionBody) -> dict[str, bool]:
+    await ID_COPY_STORE.discard(body.session_id.strip())
+    return {"ok": True}

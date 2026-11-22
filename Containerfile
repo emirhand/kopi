@@ -49,7 +49,7 @@ ARG VCS_REF="unknown"
 
 LABEL org.opencontainers.image.title="Kopi — Linux Smart Copier Appliance" \
       org.opencontainers.image.description="Headless Linux print, scan, and copy kiosk station with paired tablet UI" \
-      org.opencontainers.image.source="https://github.com/placeholder/kopi" \
+      org.opencontainers.image.source="https://github.com/emirhand/kopi" \
       org.opencontainers.image.licenses="MIT" \
       org.opencontainers.image.version="${KOPI_VERSION}" \
       org.opencontainers.image.revision="${VCS_REF}"

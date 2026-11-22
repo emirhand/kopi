@@ -12,15 +12,17 @@ import sys
 import tempfile
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import uvicorn
+from PIL import Image
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from kopi.api import admin, copy, hardware, id_scan, pairing, scan, usb_print
+from kopi.api import admin, copy, hardware, pairing, scan, usb_print
 from kopi.auth.dependencies import require_paired_client
 from kopi.auth.pairing import get_pairing_provider
 from kopi.config import (
@@ -121,10 +123,10 @@ def sweep_orphaned_temp_files(temp_dir: Path | None = None) -> int:
 
 
 async def purge_expired_stores_once() -> int:
-    """Purge expired entries from both ScanStore and IdScanStore."""
+    """Purge expired entries from ScanStore and IdCopyStore."""
     removed_scans = await copy.SCAN_STORE.purge_expired()
-    removed_id_scans = await id_scan.ID_SCAN_STORE.purge_expired()
-    return removed_scans + removed_id_scans
+    removed_id_copies = await copy.ID_COPY_STORE.purge_expired()
+    return removed_scans + removed_id_copies
 
 
 async def _periodic_store_purge_loop(interval_sec: float) -> None:
@@ -173,15 +175,37 @@ async def _app_lifespan(_app: FastAPI) -> AsyncIterator[None]:
             await task
 
 
+def _is_docs_enabled() -> bool:
+    return os.environ.get("KOPI_ENABLE_DOCS", "").strip().lower() in {"1", "true", "yes"}
+
+
 def create_app() -> FastAPI:
     """Create and configure the Kopi FastAPI application instance."""
     setup_logging()
+    Image.MAX_IMAGE_PIXELS = 100_000_000
     sweep_orphaned_temp_files()
+    docs_enabled = _is_docs_enabled()
     application = FastAPI(
         title="Kopi — Linux Smart Copier Appliance",
         version="0.1.0",
         lifespan=_app_lifespan,
+        docs_url="/docs" if docs_enabled else None,
+        redoc_url="/redoc" if docs_enabled else None,
+        openapi_url="/openapi.json" if docs_enabled else None,
     )
+
+    @application.middleware("http")
+    async def _add_security_headers(request: Request, call_next: Any) -> Any:
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'",
+        )
+        return response
 
     @application.exception_handler(SettingsError)
     async def _handle_settings_error(_request: Request, exc: SettingsError) -> JSONResponse:
@@ -204,7 +228,6 @@ def create_app() -> FastAPI:
     application.include_router(hardware.router)
     application.include_router(copy.router, dependencies=paired_deps)
     application.include_router(scan.router, dependencies=paired_deps)
-    application.include_router(id_scan.router, dependencies=paired_deps)
     application.include_router(usb_print.router, dependencies=paired_deps)
     application.include_router(admin.router)
 

@@ -61,7 +61,8 @@ def test_load_settings_generates_and_persists_credentials_on_first_run(
     assert settings.paired_device_token_hash is None
     assert settings.scanner_device == ""
     assert settings.printer_device == ""
-    assert settings.id_scan_ocr is False
+    assert settings.enable_usb_scan is True
+    assert settings.enable_email_scan is True
     assert settings.smtp == SmtpConfig()
 
     # Persisted to disk with mode 0600 (plus lock file mode 0600) and without secrets in logs
@@ -92,7 +93,8 @@ def test_save_and_load_settings_roundtrip(temp_settings_path: Path) -> None:
         paired_device_token_hash="abc123hash",
         scanner_device="pixma:04A9176D",
         printer_device="Canon_LBP",
-        id_scan_ocr=True,
+        enable_usb_scan=False,
+        enable_email_scan=False,
         smtp=SmtpConfig(
             host="smtp.example.com",
             port=465,

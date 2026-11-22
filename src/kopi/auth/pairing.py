@@ -108,9 +108,9 @@ class StaticPinPairingProvider(PairingProvider):
             paired=is_paired,
             require_pairing=is_pairing_required(),
             caller_is_paired=caller_matches,
-            device_id=settings.paired_device_id if is_paired else None,
-            device_label=settings.paired_device_label if is_paired else None,
-            paired_at=settings.paired_at if is_paired else None,
+            device_id=settings.paired_device_id if caller_matches else None,
+            device_label=settings.paired_device_label if caller_matches else None,
+            paired_at=settings.paired_at if caller_matches else None,
         )
 
     def claim(self, pin: str, device_label: str | None = None) -> PairingClaimResult:

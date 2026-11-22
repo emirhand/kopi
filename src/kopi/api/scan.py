@@ -36,6 +36,7 @@ from kopi.processing.pdf import remove_blank_pages_from_pdf
 
 log = logging.getLogger("kopi.api.scan")
 router = APIRouter(prefix="/api/scan", tags=["scan"])
+Image.MAX_IMAGE_PIXELS = 100_000_000
 
 ScanOutputFormat = Literal["pdf", "jpg", "jpeg", "png", "tiff", "tif"]
 
@@ -396,6 +397,8 @@ class ScanArchiveBody(BaseModel):
 @router.get("/usb/drives")
 async def api_list_usb_drives() -> dict[str, Any]:
     """List removable USB mass-storage drives (filtered to storage volumes only)."""
+    if not load_settings().enable_usb_scan:
+        raise HTTPException(status_code=403, detail="USB scan is disabled in Admin settings")
     vols = await asyncio.to_thread(list_usb_volumes)
     return {"drives": [v.to_dict() for v in vols]}
 
@@ -403,6 +406,8 @@ async def api_list_usb_drives() -> dict[str, Any]:
 @router.post("/email")
 async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
     settings = load_settings()
+    if not settings.enable_email_scan:
+        raise HTTPException(status_code=403, detail="Email scan is disabled in Admin settings")
     dpi = _dpi_from_resolution_label(body.resolution)
     fmt_norm = _normalize_scan_format(body.output_format)
 
@@ -458,6 +463,8 @@ async def api_scan_email(body: ScanEmailBody) -> dict[str, Any]:
 
 @router.post("/usb")
 async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)) -> dict[str, Any]:
+    if not load_settings().enable_usb_scan:
+        raise HTTPException(status_code=403, detail="USB scan is disabled in Admin settings")
     vols = await asyncio.to_thread(list_usb_volumes)
     try:
         mount = await asyncio.to_thread(
@@ -499,7 +506,8 @@ async def api_scan_usb(body: ScanUsbBody = Body(default_factory=ScanUsbBody)) ->
                     os.fsync(f.fileno())
                 saved_paths.append(dest)
         except OSError as e:
-            raise HTTPException(status_code=400, detail=f"Could not write to USB: {e}") from e
+            log.warning("scan_usb_write_failed mount=%s err=%s", mount, e)
+            raise HTTPException(status_code=400, detail="Could not write to USB drive") from e
 
     msg = (
         f"Saved to {saved_paths[0]}"
@@ -545,7 +553,8 @@ async def api_scan_archive(body: ScanArchiveBody) -> dict[str, Any]:
                 dest.write_bytes(data)
                 saved_paths.append(dest)
         except OSError as e:
-            raise HTTPException(status_code=400, detail=f"Could not write archive file: {e}") from e
+            log.warning("scan_archive_write_failed dir=%s err=%s", archive_dir, e)
+            raise HTTPException(status_code=400, detail="Could not write archive file") from e
 
     msg = (
         f"Saved to {saved_paths[0]}"

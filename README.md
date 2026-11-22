@@ -8,10 +8,10 @@ Kopi turns a Linux host connected to a multifunction printer (designed around an
 
 - **Copy** — scan from flatbed or ADF (including duplex), preview and rotate pages, add more pages, then print N copies. Supports HP-style options: color/gray, quality, lighter/darker, content type, resize (actual, fit-to-page, 91%, custom %, 2-on-1), duplex and collate. Defaults are saved on the station.
 - **Scan** — to **email** (SMTP), to **USB**, or to a local **archive** folder. Output as PDF, JPG, PNG or TIFF, with optional blank-page removal and custom filenames.
-- **ID card scan** — wizard that scans the front and back of an ID, places both on one A4 page, then prints or emails it. Optional OCR through `ocrmypdf`.
+- **ID card copy** — wizard inside Copy that scans the front and back of an ID, places both on one A4 page, and prints it (with immediate temp file cleanup).
 - **Print from USB** — browse a flash drive, preview files and print (PDF, JPG, PNG, TIFF, TXT).
 - **Tablet pairing** — exactly one tablet is allowed to use the station at a time.
-- **Admin panel** — SMTP, scanner and printer selection, pairing PIN, admin password, ID-scan OCR toggle, tablet unpairing.
+- **Admin panel** — SMTP, scanner and printer selection, pairing PIN, admin password, USB Scan & Email Scan toggles, tablet unpairing.
 
 ## Architecture
 
@@ -61,7 +61,7 @@ Only one hardware job runs at a time. A second request gets HTTP 409 ("busy").
 
 - **Python 3.11+** and [`uv`](https://docs.astral.sh/uv/). The `.python-version` file pins 3.14, so `uv` may download that interpreter.
 - **Node.js 18+** and npm, for the frontend.
-- **Real hardware mode only (Linux):** `sane-utils` (`scanimage`), CUPS (`lp`), `udisks2` and `util-linux` (`lsblk`). Optional: `ocrmypdf` for ID-scan OCR. Note that USB flash drive support relies on host `lsblk` and `udisksctl` (`udisks2` over the host D-Bus), so it is not expected to work inside a container yet; printing and network scanning do not depend on it.
+- **Real hardware mode only (Linux):** `sane-utils` (`scanimage`), CUPS (`lp`), `udisks2` and `util-linux` (`lsblk`). Note that USB flash drive support relies on host `lsblk` and `udisksctl` (`udisks2` over the host D-Bus), so it is not expected to work inside a container yet; printing and network scanning do not depend on it.
 
 ## Quick start (mock mode, no hardware)
 
@@ -133,14 +133,15 @@ See [`deploy/README.md`](deploy/README.md) for host requirements, update/rollbac
 2. For headless or containerized deployments, you can supply credentials externally via `KOPI_ADMIN_PASSWORD_FILE` / `KOPI_PAIRING_PIN_FILE` (highest precedence) or `KOPI_ADMIN_PASSWORD` / `KOPI_PAIRING_PIN`. Externally managed secrets are never written to `settings.json` and cannot be modified through the admin API/UI. If a `*_FILE` variable is set to a path that is missing, unreadable or empty, Kopi refuses to start (fails closed) rather than falling back.
 3. An unpaired station lets a tablet **claim** it by entering the pairing PIN.
 4. The backend issues a random token and stores only its SHA-256 hash. The tablet keeps the token in localStorage and in a long-lived HttpOnly cookie.
-5. Copy, scan, ID-scan and USB endpoints only accept the paired tablet's token. Anyone else gets 403.
+5. Copy, scan and USB endpoints only accept the paired tablet's token. Anyone else gets 403. The device token is valid for 10 years; if a tablet is lost or stolen, unpair it immediately via the Admin panel (**Unpair Tablet**), `POST /api/admin/unpair`, or `kopi unpair`.
+6. For HTTPS deployments behind a TLS reverse proxy, set `KOPI_COOKIE_SECURE=1` so the device cookie carries the `Secure` flag. Recommended topology: dedicated appliance host, firewall inbound access to the tablet only, restrict outbound traffic to the printer/scanner and mail relay, and use a dedicated send-only SMTP account.
 6. The **admin password** can replace the paired tablet, and the admin panel and `kopi unpair` can release it.
 
 The admin API uses the `X-Admin-Password` header.
 
 ## Configuration
 
-Settings live in `config/settings.json` at the repository root (created on first run or save with mode `0600`, gitignored). Override the path with `SETTINGS_PATH`. It holds the stored admin password and pairing PIN (unless externally managed), paired-device info, SMTP settings, scanner and printer selection, copy defaults and the ID-scan OCR flag.
+Settings live in `config/settings.json` at the repository root (created on first run or save with mode `0600`, gitignored). Override the path with `SETTINGS_PATH`. It holds the stored admin password and pairing PIN (unless externally managed), paired-device info, SMTP settings, scanner and printer selection, copy defaults, and USB/Email scan feature toggles.
 
 If `settings.json` exists on disk but is unreadable or contains corrupt/invalid JSON, Kopi refuses to start (and returns HTTP 503 if corruption occurs at runtime) without modifying the file. Restore the file from backup or remove it deliberately to start fresh.
 
@@ -162,7 +163,8 @@ If `settings.json` exists on disk but is unreadable or contains corrupt/invalid 
 | `KOPI_FRONTEND_DIST` | `frontend/dist` | Built frontend directory. |
 | `CORS_ORIGINS` | station origin | Comma-separated allowed origins (not needed in normal use since the UI is served from the same origin). |
 | `KOPI_SCAN_TTL_SEC` | `300` | How long a scan stays cached before expiry. |
-| `KOPI_ID_SCAN_TTL_SEC` | see code | ID-scan session lifetime. |
+| `KOPI_ENABLE_DOCS` | `0` | Set to `1` to enable `/docs`, `/redoc`, and `/openapi.json` (disabled by default). |
+| `KOPI_COOKIE_SECURE` | auto | Set to `1` when serving behind a TLS reverse proxy. |
 | `KOPI_ARCHIVE_DIR` | `data/archive` | Where "scan to archive" saves files. |
 | `SCAN_DEVICE` | — | Default SANE device, if none is chosen in the admin panel. |
 | `SCANIMAGE_EXTRA_ARGS` | — | Extra arguments for `scanimage`. |
@@ -184,7 +186,7 @@ Interactive docs are available at `/docs` while the server runs.
 | Pairing | `GET /api/pair/status`, `POST /api/pair/claim`, `POST /api/pair/replace` |
 | Copy | `GET/PUT /api/copy/defaults`, `POST /api/scan`, `GET /api/copy/preview/{scan_id}`, `POST /api/copy/preview/{scan_id}/rotate`, `POST /api/print`, `POST /api/copy`, `POST /api/copy/cancel` |
 | Scan | `POST /api/scan/email`, `POST /api/scan/usb`, `POST /api/scan/archive`, `GET /api/scan/usb/drives` |
-| ID scan | `POST /api/id-scan/front`, `/back`, `/compose`, `/print`, `/email`, `/discard` |
+| ID copy | `POST /api/copy/id/front`, `/back`, `/compose`, `/print`, `/discard` |
 | USB print | `GET /api/usb/files`, `GET /api/usb/preview`, `POST /api/usb/print`, `POST /api/usb/mount` |
 | Hardware | `GET /api/hardware` |
 | Admin | `POST /api/admin/verify`, `GET/PUT /api/admin/settings`, `POST /api/admin/unpair` |
@@ -214,7 +216,7 @@ cd frontend && npm run build   # type-check and build the UI
 ├── src/kopi/
 │   ├── main.py             # app factory, CLI entry point
 │   ├── config.py           # settings model, atomic JSON persistence
-│   ├── api/                # routers: copy, scan, id_scan, usb_print, pairing, admin, hardware
+│   ├── api/                # routers: copy, scan, usb_print, pairing, admin, hardware
 │   ├── auth/               # pairing provider and token dependency
 │   ├── hardware/           # scanner, printer, usb, lock (real + mock)
 │   └── processing/         # image enhance, pdf, id_card, mailer

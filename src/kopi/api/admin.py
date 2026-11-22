@@ -37,7 +37,8 @@ class AdminSettingsUpdate(BaseModel):
     smtp: SmtpConfig = Field(default_factory=SmtpConfig)
     scanner_device: str = ""
     printer_device: str = ""
-    id_scan_ocr: bool = False
+    enable_usb_scan: bool = True
+    enable_email_scan: bool = True
     pairing_pin: str | None = None
     new_admin_password: str | None = None
 
@@ -84,7 +85,8 @@ async def api_admin_settings(
         "smtp": smtp_data,
         "scanner_device": settings.scanner_device,
         "printer_device": settings.printer_device,
-        "id_scan_ocr": settings.id_scan_ocr,
+        "enable_usb_scan": settings.enable_usb_scan,
+        "enable_email_scan": settings.enable_email_scan,
         "pairing_pin_set": bool(settings.pairing_pin),
         "pairing_pin_managed": is_pairing_pin_managed(),
         "admin_password_managed": is_admin_password_managed(),
@@ -111,7 +113,8 @@ async def api_admin_settings_put(
         settings.smtp.password = existing_smtp_password
     settings.scanner_device = body.scanner_device.strip()
     settings.printer_device = body.printer_device.strip()
-    settings.id_scan_ocr = bool(body.id_scan_ocr)
+    settings.enable_usb_scan = bool(body.enable_usb_scan)
+    settings.enable_email_scan = bool(body.enable_email_scan)
     if body.pairing_pin is not None and body.pairing_pin.strip():
         candidate_pin = body.pairing_pin.strip()
         if is_pairing_pin_managed():

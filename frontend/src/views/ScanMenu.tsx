@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { apiUrl } from "../api";
 import { KioskButton } from "../components/KioskButton";
 import { ProgressBar } from "../components/ProgressBar";
 import { ScannedPagePreviewCard } from "../components/ScannedPagePreviewCard";
@@ -15,6 +17,33 @@ export function ScanMenu() {
   const destination: ScanDestination | null =
     rawDest === "email" || rawDest === "usb" || rawDest === "archive" ? rawDest : null;
 
+  const [enableUsbScan, setEnableUsbScan] = useState(true);
+  const [enableEmailScan, setEnableEmailScan] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await fetch(apiUrl("/api/settings/public"));
+        if (!res.ok || cancelled) return;
+        const data = await res.json();
+        if (typeof data.enable_usb_scan === "boolean") setEnableUsbScan(data.enable_usb_scan);
+        if (typeof data.enable_email_scan === "boolean") setEnableEmailScan(data.enable_email_scan);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if ((destination === "usb" && !enableUsbScan) || (destination === "email" && !enableEmailScan)) {
+      nav("/scan", { replace: true });
+    }
+  }, [destination, enableUsbScan, enableEmailScan, nav]);
+
   const ctrl = useScanController(destination);
 
   if (!destination) {
@@ -22,6 +51,8 @@ export function ScanMenu() {
       <ScanDestinationSelector
         onBack={() => nav("/")}
         onSelectDestination={(dest) => nav(`/scan/${dest}`)}
+        enableUsbScan={enableUsbScan}
+        enableEmailScan={enableEmailScan}
       />
     );
   }

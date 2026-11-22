@@ -57,7 +57,10 @@ async def api_hardware(
 @router.get("/settings/public")
 async def api_settings_public() -> dict[str, bool]:
     settings = load_settings()
-    return {"id_scan_ocr": bool(settings.id_scan_ocr)}
+    return {
+        "enable_usb_scan": bool(settings.enable_usb_scan),
+        "enable_email_scan": bool(settings.enable_email_scan),
+    }
 
 
 @router.post("/usb/mount", dependencies=[Depends(require_paired_client)])

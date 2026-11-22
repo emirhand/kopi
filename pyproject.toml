@@ -3,6 +3,7 @@ name = "kopi"
 version = "0.1.0"
 description = "Linux print/scan/copy station with paired client web interface"
 readme = "README.md"
+license = "MIT"
 authors = [
     { name = "emirhand" }
 ]

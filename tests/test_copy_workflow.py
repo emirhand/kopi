@@ -379,11 +379,10 @@ def test_startup_sweep_removes_orphaned_kopi_temp_files(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_periodic_purge_removes_expired_scan_and_id_scan_files(
+async def test_periodic_purge_removes_expired_scan_and_id_copy_files(
     tmp_path: Path,
 ) -> None:
-    from kopi.api.copy import ScanStore
-    from kopi.api.id_scan import IdScanStore
+    from kopi.api.copy import IdCopyStore, ScanStore
 
     scan_file = tmp_path / "expired-copy.png"
     scan_file.write_bytes(b"png")
@@ -398,9 +397,8 @@ async def test_periodic_purge_removes_expired_scan_and_id_scan_files(
 
     id_front = tmp_path / "expired-id-front.png"
     id_front.write_bytes(b"front")
-    id_store = IdScanStore(ttl_sec=60)
-    sid = await id_store.create_session()
-    await id_store.set_side(sid, "front", str(id_front))
+    id_store = IdCopyStore(ttl_sec=60)
+    sid = await id_store.create_with_front(str(id_front))
     assert id_front.is_file()
 
     # Force expiry and run purge_expired()

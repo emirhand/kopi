@@ -8,7 +8,7 @@ import logging
 import os
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import img2pdf
 from fastapi import APIRouter, HTTPException, Query
@@ -29,6 +29,8 @@ from kopi.hardware import (
 
 log = logging.getLogger("kopi.api.usb_print")
 router = APIRouter(prefix="/api/usb", tags=["usb-print"])
+Image.MAX_IMAGE_PIXELS = 100_000_000
+_MAX_TXT_PREVIEW_BYTES = 128 * 1024
 
 _PRINTABLE_EXTENSIONS: frozenset[str] = frozenset(
     {".pdf", ".jpg", ".jpeg", ".png", ".tif", ".tiff", ".txt"}
@@ -125,7 +127,8 @@ async def api_usb_list_files(
     try:
         children = list(current_dir.iterdir())
     except OSError as e:
-        raise HTTPException(status_code=400, detail=f"Cannot read USB directory: {e}") from e
+        log.warning("usb_dir_read_failed path=%s err=%s", current_dir, e)
+        raise HTTPException(status_code=400, detail="Cannot read USB directory") from e
 
     for item in children:
         name = item.name
@@ -203,7 +206,9 @@ async def api_usb_preview_file(
         raise HTTPException(status_code=400, detail="Unsupported file format for preview")
 
     if ext == ".txt":
-        text_content = target.read_text(encoding="utf-8", errors="replace")
+        with target.open("rb") as f:
+            raw_txt = f.read(_MAX_TXT_PREVIEW_BYTES)
+        text_content = raw_txt.decode("utf-8", errors="replace")
         png_bytes = _render_text_preview_png(text_content, title=target.name)
         return Response(
             content=png_bytes,
@@ -249,7 +254,8 @@ async def api_usb_preview_file(
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=400, detail=f"Could not preview PDF: {e}") from e
+            log.warning("usb_pdf_preview_failed path=%s err=%s", target, e)
+            raise HTTPException(status_code=400, detail="Could not preview PDF") from e
 
     # Image formats (.png, .jpg, .jpeg, .tif, .tiff)
     try:
@@ -271,7 +277,8 @@ async def api_usb_preview_file(
     except HTTPException:
         raise
     except Exception as e:
-        raise HTTPException(status_code=400, detail=f"Could not preview image: {e}") from e
+        log.warning("usb_image_preview_failed path=%s err=%s", target, e)
+        raise HTTPException(status_code=400, detail="Could not preview image") from e
 
 
 class UsbPrintBody(BaseModel):
@@ -280,12 +287,12 @@ class UsbPrintBody(BaseModel):
     mount_path: str | None = None
     copies: int = Field(default=1, ge=1, le=99)
     duplex: bool = False
-    page_flip: str = "long_edge"
+    page_flip: Literal["long_edge", "short_edge"] = "long_edge"
     color: bool = True
-    paper_size: str = "A4"
+    paper_size: Literal["A4", "Letter", "Legal", "A5", "A3", "4x6", "5x7", "Executive"] = "A4"
     collate: bool = True
-    resize_mode: str = "fit_to_page"
-    quality: str = "normal"
+    resize_mode: Literal["actual", "fit_to_page", "two_on_one"] = "fit_to_page"
+    quality: Literal["draft", "normal", "best"] = "normal"
 
 
 def _prepare_printable_file(target: Path) -> tuple[str, Path | None]:
@@ -325,7 +332,8 @@ def _prepare_printable_file(target: Path) -> tuple[str, Path | None]:
         raise
     except Exception as e:
         temp_pdf.unlink(missing_ok=True)
-        raise HTTPException(status_code=400, detail=f"Could not prepare image for printing: {e}") from e
+        log.warning("usb_print_prepare_failed path=%s err=%s", target, e)
+        raise HTTPException(status_code=400, detail="Could not prepare image for printing") from e
     except BaseException:
         temp_pdf.unlink(missing_ok=True)
         raise

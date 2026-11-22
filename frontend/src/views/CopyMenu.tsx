@@ -34,7 +34,7 @@ export function CopyMenu() {
       <CopyModeSelector
         onBack={() => nav("/")}
         onSelectDocument={() => nav("/copy/document")}
-        onSelectIdCard={() => nav("/id-scan")}
+        onSelectIdCard={() => nav("/copy/id")}
         onSelectPhoto={() => nav("/copy/photo")}
       />
     );
@@ -97,7 +97,7 @@ export function CopyMenu() {
           <button
             type="button"
             disabled={ctrl.hardwareBusy}
-            onClick={() => nav("/id-scan")}
+            onClick={() => nav("/copy/id")}
             className="rounded-lg px-3 py-1.5 text-xs font-bold uppercase tracking-wider text-zinc-400 transition hover:text-zinc-200"
           >
             ID Card ↗

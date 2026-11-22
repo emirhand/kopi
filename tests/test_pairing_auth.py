@@ -100,11 +100,14 @@ async def test_pairing_lifecycle_exclusive_lock_and_tablet_replacement(
 
     # Use a fresh client (simulating Tablet B on the network with no cookies)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client_b:
-        # 5. Tablet B sees paired=True, caller_is_paired=False
+        # 5. Tablet B sees paired=True, caller_is_paired=False, and device metadata is masked
         st_b = await client_b.get("/api/pair/status")
         assert st_b.status_code == 200
         assert st_b.json()["paired"] is True
         assert st_b.json()["caller_is_paired"] is False
+        assert st_b.json()["device_id"] is None
+        assert st_b.json()["device_label"] is None
+        assert st_b.json()["paired_at"] is None
 
         # 6. Tablet B cannot claim while Tablet A is paired (409 Conflict)
         claim_b = await client_b.post(
