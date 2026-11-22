@@ -61,7 +61,7 @@ Only one hardware job runs at a time. A second request gets HTTP 409 ("busy").
 
 - **Python 3.11+** and [`uv`](https://docs.astral.sh/uv/). The `.python-version` file pins 3.14, so `uv` may download that interpreter.
 - **Node.js 18+** and npm, for the frontend.
-- **Real hardware mode only (Linux):** `sane-utils` (`scanimage`), CUPS (`lp`), `udisks2` and `util-linux` (`lsblk`). Note that USB flash drive support relies on host `lsblk` and `udisksctl` (`udisks2` over the host D-Bus), so it is not expected to work inside a container yet; printing and network scanning do not depend on it.
+- **Real hardware mode only (Linux):** `sane-utils` (`scanimage`), CUPS (`lp`), `udisks2` and `util-linux` (`lsblk`).
 
 ## Quick start (mock mode, no hardware)
 
@@ -117,20 +117,10 @@ uv run kopi print-setup-sheet
 | `uv run kopi unpair` | Release the paired tablet so a new one can claim the station. |
 | `uv run kopi print-setup-sheet` | Print tablet setup instructions (URL and PIN). |
 
-## Container deployment (Podman + Quadlet)
-
-For headless appliance deployments (such as a Raspberry Pi running Podman and systemd), build and install the hardened Quadlet container service with:
-
-```bash
-sudo ./deploy/install.sh install
-```
-
-See [`deploy/README.md`](deploy/README.md) for host requirements, update/rollback and uninstall commands, Podman secret injection, hardware passthrough, and the Raspberry Pi verification checklist.
-
 ## Pairing and access
 
 1. On first run, if no credentials are stored or supplied via environment variables/secret files, Kopi generates a random numeric pairing PIN (6 digits) and admin PIN (8 digits) and persists them to `settings.json` (mode `0600`). Run `uv run kopi status --show-secrets` (or `kopi status --show-secrets` on the station) to inspect them.
-2. For headless or containerized deployments, you can supply credentials externally via `KOPI_ADMIN_PASSWORD_FILE` / `KOPI_PAIRING_PIN_FILE` (highest precedence) or `KOPI_ADMIN_PASSWORD` / `KOPI_PAIRING_PIN`. Externally managed secrets are never written to `settings.json` and cannot be modified through the admin API/UI. If a `*_FILE` variable is set to a path that is missing, unreadable or empty, Kopi refuses to start (fails closed) rather than falling back.
+2. For headless or automated deployments, you can supply credentials externally via `KOPI_ADMIN_PASSWORD_FILE` / `KOPI_PAIRING_PIN_FILE` / `KOPI_SMTP_PASSWORD_FILE` / `KOPI_OKTA_API_TOKEN_FILE` (highest precedence) or their non-`_FILE` environment variable counterparts. Externally managed secrets are never written to `settings.json` and cannot be modified through the admin API/UI. If a `*_FILE` variable is set to a path that is missing, unreadable or empty, Kopi refuses to start (fails closed) rather than falling back.
 3. An unpaired station lets a tablet **claim** it by entering the pairing PIN.
 4. The backend issues a random token and stores only its SHA-256 hash. The tablet keeps the token in localStorage and in a long-lived HttpOnly cookie.
 5. Copy, scan and USB endpoints only accept the paired tablet's token. Anyone else gets 403. The device token is valid for 10 years; if a tablet is lost or stolen, unpair it immediately via the Admin panel (**Unpair Tablet**), `POST /api/admin/unpair`, or `kopi unpair`.
@@ -203,7 +193,7 @@ cd frontend && npm run build   # type-check and build the UI
 ## Security notes
 
 - SMTP and stored admin/pairing credentials are saved as plain JSON on disk (`settings.json` is written with mode `0600`). Keep the settings file readable by the service user only, or inject credentials via `KOPI_ADMIN_PASSWORD_FILE` / `KOPI_PAIRING_PIN_FILE`.
-- Authentication rate limits are global (not per client), so repeated bad attempts from anywhere on the network can temporarily lock admin or pairing attempts; rate-limiter state is held in memory and cleared on restart.
+- Authentication rate limits are enforced per client IP (with a higher global cap), and failed attempts are logged and audited; rate-limiter state is held in memory and cleared on restart.
 - CORS defaults to the station's own origin (the UI is served from the same origin anyway). Set `CORS_ORIGINS` only if hosting the frontend on a separate origin.
 - Pending scans are cached in memory and in temporary files. The cache is single-process and ephemeral, so a restart drops pending scan IDs.
 - Intended for a locked-down appliance on a trusted network, **not** for the open internet.
