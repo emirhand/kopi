@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from fastapi import APIRouter, Header, HTTPException, Request
+from fastapi import APIRouter, Header, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
 from kopi.audit import record_audit_event
@@ -83,6 +83,7 @@ async def api_admin_verify(body: AdminVerifyBody, request: Request) -> dict[str,
 @router.get("/settings")
 async def api_admin_settings(
     request: Request,
+    refresh: bool = Query(default=False),
     x_admin_password: str | None = Header(default=None, alias="X-Admin-Password"),
 ) -> dict[str, Any]:
     client_ip = request.client.host if request.client else None
@@ -96,8 +97,8 @@ async def api_admin_settings(
     okta_data["api_token_managed"] = is_okta_token_managed()
     lock = get_hardware_lock()
     scanners, printers = await asyncio.gather(
-        list_scan_devices_async(is_busy=lock.is_busy),
-        list_printer_queues_async(),
+        list_scan_devices_async(is_busy=lock.is_busy, force_refresh=refresh),
+        list_printer_queues_async(force_refresh=refresh),
     )
     return {
         "smtp": smtp_data,

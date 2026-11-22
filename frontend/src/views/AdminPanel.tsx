@@ -41,6 +41,7 @@ export function AdminPanel() {
   const [oktaTokenManaged, setOktaTokenManaged] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [refreshingDevices, setRefreshingDevices] = useState(false);
   const [scannerDevice, setScannerDevice] = useState("");
   const [printerDevice, setPrinterDevice] = useState("");
   const [enableUsbScan, setEnableUsbScan] = useState(true);
@@ -129,6 +130,42 @@ export function AdminPanel() {
       }
     })();
   }, [nav]);
+
+  async function refreshDevices() {
+    const pw = getAdminPassword();
+    if (!pw) {
+      nav("/admin", { replace: true });
+      return;
+    }
+    setRefreshingDevices(true);
+    try {
+      const res = await fetch(apiUrl("/api/admin/settings?refresh=1"), {
+        headers: { "X-Admin-Password": pw },
+      });
+      if (res.status === 401 || res.status === 403) {
+        clearAdminSession();
+        nav("/admin", { replace: true });
+        return;
+      }
+      if (!res.ok) {
+        setModal({ title: "Hardware", message: await parseErrorDetail(res), variant: "error" });
+        return;
+      }
+      const data: AdminSettingsResponse = await res.json();
+      setHardwareOptions({
+        scanners: Array.isArray(data?.hardware_options?.scanners) ? data.hardware_options.scanners : [],
+        printers: Array.isArray(data?.hardware_options?.printers) ? data.hardware_options.printers : [],
+      });
+    } catch (e) {
+      setModal({
+        title: "Hardware",
+        message: e instanceof Error ? e.message : "Network error",
+        variant: "error",
+      });
+    } finally {
+      setRefreshingDevices(false);
+    }
+  }
 
   async function unpairTablet() {
     const pw = getAdminPassword();
@@ -338,7 +375,22 @@ export function AdminPanel() {
           </label>
         </div>
 
-        <h3 className="text-sm uppercase tracking-wide text-kiosk-muted mt-1">Hardware</h3>
+        <div className="flex items-center justify-between gap-3 mt-1">
+          <div>
+            <h3 className="text-sm uppercase tracking-wide text-kiosk-muted">Hardware</h3>
+            <p className="text-xs text-kiosk-muted">
+              Uses Linux CUPS &amp; SANE discovery (plug-and-play IPP Everywhere / AirPrint / eSCL).
+            </p>
+          </div>
+          <KioskButton
+            variant="secondary"
+            className="shrink-0 min-h-[2.75rem] px-4 text-sm"
+            disabled={busy || refreshingDevices}
+            onClick={refreshDevices}
+          >
+            {refreshingDevices ? "Refreshing…" : "Refresh Devices"}
+          </KioskButton>
+        </div>
         <label className="text-sm text-kiosk-muted">
           Scanner device
           <select

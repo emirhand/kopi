@@ -22,7 +22,10 @@ def app(temp_settings_path: Path, monkeypatch: pytest.MonkeyPatch) -> FastAPI:
 
 
 @pytest.mark.asyncio
-async def test_admin_verify_and_settings_crud(app: FastAPI) -> None:
+async def test_admin_verify_and_settings_crud(
+    app: FastAPI,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         # Verify default password ("1234")
         res_ok = await client.post("/api/admin/verify", json={"password": "1234"})
@@ -96,6 +99,32 @@ async def test_admin_verify_and_settings_crud(app: FastAPI) -> None:
         assert updated["smtp"]["password_set"] is True
         assert "pairing_pin" not in updated
         assert updated["pairing_pin_set"] is True
+
+        # Confirm refresh=1 passes force_refresh=True to discovery helpers
+        import kopi.api.admin as admin_mod
+
+        seen_refresh: dict[str, bool] = {}
+
+        async def fake_scanners(*, is_busy: bool = False, force_refresh: bool = False) -> list[str]:
+            _ = is_busy
+            seen_refresh["scanners"] = force_refresh
+            return ["airscan:escl:Test"]
+
+        async def fake_printers(*, force_refresh: bool = False) -> list[str]:
+            seen_refresh["printers"] = force_refresh
+            return ["Test_Printer"]
+
+        monkeypatch.setattr(admin_mod, "list_scan_devices_async", fake_scanners)
+        monkeypatch.setattr(admin_mod, "list_printer_queues_async", fake_printers)
+        refreshed = await client.get(
+            "/api/admin/settings?refresh=1", headers={"X-Admin-Password": "1234"}
+        )
+        assert refreshed.status_code == 200
+        assert seen_refresh == {"scanners": True, "printers": True}
+        assert refreshed.json()["hardware_options"] == {
+            "scanners": ["airscan:escl:Test"],
+            "printers": ["Test_Printer"],
+        }
 
         # Confirm subsequent PUT with empty smtp.password preserves existing password
         update_without_pw: dict[str, object] = {
